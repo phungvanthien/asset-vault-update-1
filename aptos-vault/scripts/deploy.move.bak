@@ -1,0 +1,61 @@
+script {
+    use std::signer;
+    use std::vector;
+    use std::debug;
+    use vault::vault_core;
+    use vault::pancakeswap_adapter;
+
+    fun main(account: &signer) {
+        // Note: init_module functions are called automatically when modules are published
+        // No need to call them manually
+        
+        // Create a test vault with USDT as denomination asset
+        let denomination_asset = vault_core::get_usdt_address();
+        let fund_manager = signer::address_of(account);
+        let fee_rate = 100; // 1% fee (100 basis points)
+        vault_core::create_vault(
+            account,
+            denomination_asset,
+            fund_manager,
+            fee_rate,
+        );
+        debug::print(&b"Vault initialized with USDT denomination asset");
+        debug::print(&b"Fund manager: ");
+        debug::print(&fund_manager);
+        debug::print(&b"Fee rate: ");
+        debug::print(&fee_rate);
+        // Test vault info retrieval
+        let (total_shares, total_assets, vault_id, denomination_asset, fund_manager, fee_rate, is_active) = 
+            vault_core::get_vault_info(0);
+        debug::print(&b"Vault ID: ");
+        debug::print(&vault_id);
+        debug::print(&b"Total shares: ");
+        debug::print(&total_shares);
+        debug::print(&b"Total assets: ");
+        debug::print(&total_assets);
+        debug::print(&b"Denomination asset: ");
+        debug::print(&denomination_asset);
+        debug::print(&b"Fund manager: ");
+        debug::print(&fund_manager);
+        debug::print(&b"Fee rate: ");
+        debug::print(&fee_rate);
+        debug::print(&b"Active: ");
+        debug::print(&is_active);
+        // Test PancakeSwap adapter
+        let router = pancakeswap_adapter::create_router();
+        let router_addr = pancakeswap_adapter::get_router_address(&router);
+        debug::print(&b"PancakeSwap router address: ");
+        debug::print(&router_addr);
+        // Test quote calculation
+        let path = vector::empty<address>();
+        vector::push_back(&mut path, vault_core::get_usdt_address());
+        vector::push_back(&mut path, @0x1);
+        let quote = pancakeswap_adapter::get_quote(
+            &router,
+            1000000, // 1 USDT
+            path,
+        );
+        debug::print(&b"Quote for 1 USDT to APT: ");
+        debug::print(&quote);
+    }
+} 

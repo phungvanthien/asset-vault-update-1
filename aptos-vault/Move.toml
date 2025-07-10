@@ -1,0 +1,13 @@
+[package]
+name = "AptosVault"
+version = "1.0.0"
+authors = ["Your Name <your.email@example.com>"]
+upgrade_policy = "compatible"
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-framework/", rev = "main" }
+
+[addresses]
+vault = "0x2fdd1d8c08c6d2e447cffd67419cd9f0d53bedd003e5a6ee427b649f0c1077ef"
+std = "0x1"
+aptos_framework = "0x1" 

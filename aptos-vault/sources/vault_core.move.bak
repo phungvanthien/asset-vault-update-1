@@ -1,0 +1,420 @@
+module vault::vault_core {
+    use std::signer;
+    use std::vector;
+    use std::table::{Self, Table};
+    use aptos_framework::coin::{Self, Coin};
+    use aptos_framework::account;
+    use aptos_framework::timestamp;
+    use aptos_framework::event::{Self, EventHandle};
+    use std::debug;
+
+    // Removed circular dependency
+
+    // ===== ERRORS =====
+    const ENOT_VAULT_MANAGER: u64 = 1;
+    const ENOT_FUND_MANAGER: u64 = 2;
+    const EVAULT_NOT_FOUND: u64 = 3;
+    const EINSUFFICIENT_SHARES: u64 = 4;
+    const EINSUFFICIENT_ASSETS: u64 = 5;
+    const EVAULT_INACTIVE: u64 = 6;
+    const EINVALID_AMOUNT: u64 = 7;
+    const EZERO_SHARES: u64 = 8;
+    const EZERO_ASSETS: u64 = 9;
+
+    // ===== USDT ADDRESS =====
+    const USDT_ADDRESS: address = @0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa;
+
+    // ===== STRUCTS =====
+    
+    /// Main vault resource (ERC4626 equivalent)
+    struct VaultResource has key {
+        id: u64,
+        total_shares: u64,
+        total_assets: u64,
+        denomination_asset: address,
+        fund_manager: address,
+        fee_rate: u64, // basis points (1/10000)
+        is_active: bool,
+        created_at: u64,
+        // deposit_events: EventHandle<DepositEvent>,
+        // withdraw_events: EventHandle<WithdrawEvent>,
+        // rebalance_events: EventHandle<RebalanceEvent>,
+    }
+
+    /// User's vault shares (ERC4626 shares equivalent)
+    struct VaultShares has key, store {
+        vault_id: u64,
+        shares: u64,
+        owner: address,
+    }
+
+    /// Asset pool for the vault
+    struct AssetPool has key {
+        vault_id: u64,
+        assets: Table<address, u64>, // token_address -> amount
+        total_value_usd: u64,
+    }
+
+    /// Vault registry to track all vaults
+    struct VaultRegistry has key {
+        vaults: Table<u64, address>, // vault_id -> vault_address
+        next_vault_id: u64,
+    }
+
+    // ===== EVENTS (ERC4626 equivalent) =====
+    
+    struct DepositEvent has drop, store {
+        vault_id: u64,
+        sender: address,
+        owner: address,
+        assets: u64,
+        shares: u64,
+        timestamp: u64,
+    }
+
+    struct WithdrawEvent has drop, store {
+        vault_id: u64,
+        sender: address,
+        receiver: address,
+        owner: address,
+        assets: u64,
+        shares: u64,
+        timestamp: u64,
+    }
+
+    struct RebalanceEvent has drop, store {
+        vault_id: u64,
+        fund_manager: address,
+        trades_count: u64,
+        timestamp: u64,
+    }
+
+    // ===== TRADE STRUCTURE =====
+
+    struct Trade has drop, store, copy {
+        token_in: address,
+        token_out: address,
+        amount_in: u64,
+        min_amount_out: u64,
+    }
+
+    // ===== INITIALIZATION =====
+
+    /// Initialize the vault module
+    fun init_module(account: &signer) {
+        // Initialize vault registry
+        move_to(account, VaultRegistry {
+            vaults: table::new(),
+            next_vault_id: 0,
+        });
+    }
+
+    // ===== VAULT MANAGEMENT =====
+
+    /// Create a new vault (ERC4626 vault creation)
+    public entry fun create_vault(
+        vault_manager: &signer,
+        denomination_asset: address,
+        fund_manager: address,
+        fee_rate: u64,
+    ) acquires VaultRegistry {
+        let vault_manager_addr = signer::address_of(vault_manager);
+        
+        // Get next vault ID
+        let registry = borrow_global_mut<VaultRegistry>(@vault);
+        let vault_id = registry.next_vault_id;
+        registry.next_vault_id = registry.next_vault_id + 1;
+        
+        // Register vault
+        table::add(&mut registry.vaults, vault_id, vault_manager_addr);
+        
+        // Initialize vault resource (ERC4626 vault state)
+        move_to(vault_manager, VaultResource {
+            id: vault_id,
+            total_shares: 0,
+            total_assets: 0,
+            denomination_asset,
+            fund_manager,
+            fee_rate,
+            is_active: true,
+            created_at: timestamp::now_seconds(),
+            // deposit_events: event::new_event_handle<DepositEvent>(account::create_guid(vault_manager)),
+            // withdraw_events: event::new_event_handle<WithdrawEvent>(account::create_guid(vault_manager)),
+            // rebalance_events: event::new_event_handle<RebalanceEvent>(account::create_guid(vault_manager)),
+        });
+
+        // Initialize asset pool
+        move_to(vault_manager, AssetPool {
+            vault_id,
+            assets: table::new(),
+            total_value_usd: 0,
+        });
+    }
+
+    // ===== ERC4626 CORE FUNCTIONS =====
+
+    /// Deposit assets into vault (ERC4626 deposit)
+    public entry fun deposit<CoinType>(
+        user: &signer,
+        vault_id: u64,
+        amount: u64,
+    ) acquires VaultRegistry, VaultResource, VaultShares {
+        let user_addr = signer::address_of(user);
+        
+        // Validate amount
+        assert!(amount > 0, EINVALID_AMOUNT);
+        
+        // Get vault resource
+        let vault_addr = get_vault_address(vault_id);
+        let vault = borrow_global_mut<VaultResource>(vault_addr);
+        
+        // Check if vault is active
+        assert!(vault.is_active, EVAULT_INACTIVE);
+        
+        // Transfer coins from user to vault
+        let coins = coin::withdraw<CoinType>(user, amount);
+        coin::deposit(vault_addr, coins);
+        
+        // Calculate shares to mint (ERC4626 convertToShares logic)
+        let shares_to_mint = if (vault.total_shares == 0) {
+            // First deposit: shares = amount
+            amount
+        } else {
+            // Subsequent deposits: shares = (amount * total_shares) / total_assets
+            (amount * vault.total_shares) / vault.total_assets
+        };
+        
+        // Update vault state
+        vault.total_assets = vault.total_assets + amount;
+        vault.total_shares = vault.total_shares + shares_to_mint;
+        
+        // Mint shares to user
+        if (!exists<VaultShares>(user_addr)) {
+            move_to(user, VaultShares {
+                vault_id,
+                shares: 0,
+                owner: user_addr,
+            });
+        };
+        
+        let user_shares = borrow_global_mut<VaultShares>(user_addr);
+        user_shares.shares = user_shares.shares + shares_to_mint;
+        
+        // Emit deposit event (ERC4626 Deposit event) - temporarily disabled
+        // event::emit_event(&mut vault.deposit_events, DepositEvent {
+        //     vault_id,
+        //     sender: user_addr,
+        //     owner: user_addr,
+        //     assets: amount,
+        //     shares: shares_to_mint,
+        //     timestamp: timestamp::now_seconds(),
+        // });
+    }
+
+    /// Withdraw assets from vault (ERC4626 withdraw)
+    public entry fun withdraw<CoinType>(
+        user: &signer,
+        vault_id: u64,
+        shares: u64,
+    ) acquires VaultRegistry, VaultResource, VaultShares {
+        let user_addr = signer::address_of(user);
+        
+        // Validate amount
+        assert!(shares > 0, EINVALID_AMOUNT);
+        
+        // Get user shares
+        assert!(exists<VaultShares>(user_addr), EINSUFFICIENT_SHARES);
+        let user_shares = borrow_global_mut<VaultShares>(user_addr);
+        assert!(user_shares.shares >= shares, EINSUFFICIENT_SHARES);
+        
+        // Get vault resource
+        let vault_addr = get_vault_address(vault_id);
+        let vault = borrow_global_mut<VaultResource>(vault_addr);
+        
+        // Check if vault is active
+        assert!(vault.is_active, EVAULT_INACTIVE);
+        
+        // Calculate assets to return (ERC4626 convertToAssets logic)
+        let assets_to_return = if (vault.total_shares == 0) {
+            0
+        } else {
+            (shares * vault.total_assets) / vault.total_shares
+        };
+        
+        // Validate sufficient assets
+        assert!(vault.total_assets >= assets_to_return, EINSUFFICIENT_ASSETS);
+        
+        // Update vault state
+        vault.total_shares = vault.total_shares - shares;
+        vault.total_assets = vault.total_assets - assets_to_return;
+        
+        // Burn user shares
+        user_shares.shares = user_shares.shares - shares;
+        
+        // Transfer assets to user
+        // Note: In practice, you'd need proper vault signer management
+        // For now, we'll skip the actual coin transfer in this simplified version
+        // let coins = coin::withdraw<CoinType>(&account::create_signer(vault_addr), assets_to_return);
+        // coin::deposit(user_addr, coins);
+        
+        // Emit withdraw event (ERC4626 Withdraw event) - temporarily disabled
+        // event::emit_event(&mut vault.withdraw_events, WithdrawEvent {
+        //     vault_id,
+        //     sender: user_addr,
+        //     receiver: user_addr,
+        //     owner: user_addr,
+        //     assets: assets_to_return,
+        //     shares,
+        //     timestamp: timestamp::now_seconds(),
+        // });
+    }
+
+    /// Redeem shares for assets (ERC4626 redeem)
+    public entry fun redeem<CoinType>(
+        user: &signer,
+        vault_id: u64,
+        shares: u64,
+    ) acquires VaultRegistry, VaultResource, VaultShares {
+        // Same as withdraw for this implementation
+        withdraw<CoinType>(user, vault_id, shares);
+    }
+
+    // ===== ERC4626 VIEW FUNCTIONS =====
+
+    /// Get total assets in vault (ERC4626 totalAssets)
+    public fun total_assets(vault_id: u64): u64 acquires VaultRegistry, VaultResource {
+        let vault_addr = get_vault_address(vault_id);
+        let vault = borrow_global<VaultResource>(vault_addr);
+        vault.total_assets
+    }
+
+    /// Get total shares in vault (ERC4626 totalSupply)
+    public fun total_shares(vault_id: u64): u64 acquires VaultRegistry, VaultResource {
+        let vault_addr = get_vault_address(vault_id);
+        let vault = borrow_global<VaultResource>(vault_addr);
+        vault.total_shares
+    }
+
+    /// Convert assets to shares (ERC4626 convertToShares)
+    public fun convert_to_shares(vault_id: u64, assets: u64): u64 acquires VaultRegistry, VaultResource {
+        let vault_addr = get_vault_address(vault_id);
+        let vault = borrow_global<VaultResource>(vault_addr);
+        
+        if (vault.total_shares == 0) {
+            assets
+        } else {
+            (assets * vault.total_shares) / vault.total_assets
+        }
+    }
+
+    /// Convert shares to assets (ERC4626 convertToAssets)
+    public fun convert_to_assets(vault_id: u64, shares: u64): u64 acquires VaultRegistry, VaultResource {
+        let vault_addr = get_vault_address(vault_id);
+        let vault = borrow_global<VaultResource>(vault_addr);
+        
+        if (vault.total_shares == 0) {
+            0
+        } else {
+            (shares * vault.total_assets) / vault.total_shares
+        }
+    }
+
+    /// Get user shares (ERC4626 balanceOf)
+    public fun balance_of(user_addr: address, vault_id: u64): u64 acquires VaultShares {
+        if (exists<VaultShares>(user_addr)) {
+            let shares = borrow_global<VaultShares>(user_addr);
+            if (shares.vault_id == vault_id) {
+                shares.shares
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+
+    // ===== REBALANCE =====
+
+    /// Rebalance vault assets (only fund manager can call)
+    public entry fun rebalance(
+        fund_manager: &signer,
+        vault_id: u64,
+        trades: vector<u64>,
+    ) acquires VaultRegistry, VaultResource {
+        let fund_manager_addr = signer::address_of(fund_manager);
+        
+        // Validate fund manager
+        let vault_addr = get_vault_address(vault_id);
+        let vault = borrow_global_mut<VaultResource>(vault_addr);
+        assert!(vault.fund_manager == fund_manager_addr, ENOT_FUND_MANAGER);
+        
+        // Execute trades
+        let i = 0;
+        while (i < vector::length(&trades)) {
+            let trade_id = *vector::borrow(&trades, i);
+            // This part needs to be implemented to fetch the actual trade object
+            // For now, we'll just pass a placeholder or remove if not directly used
+            // execute_trade(vault_id, trade_id); // This line would cause a type mismatch
+            i = i + 1;
+        };
+        
+        // Emit rebalance event - temporarily disabled
+        // event::emit_event(&mut vault.rebalance_events, RebalanceEvent {
+        //     vault_id,
+        //     fund_manager: fund_manager_addr,
+        //     trades_count: vector::length(&trades),
+        //     timestamp: timestamp::now_seconds(),
+        // });
+    }
+
+    // ===== HELPER FUNCTIONS =====
+
+    /// Get vault address from vault ID
+    public fun get_vault_address(vault_id: u64): address acquires VaultRegistry {
+        let registry = borrow_global<VaultRegistry>(@vault);
+        *table::borrow(&registry.vaults, vault_id)
+    }
+
+    /// Execute a trade
+    public fun execute_trade(vault_id: u64, trade_id: u64, token_in: address, token_out: address, amount_in: u64, amount_out: u64) {
+        // Implementation for trade execution
+        // This would integrate with DEX adapter
+        // For now, this is a placeholder that comptroller can call
+        
+        // In practice, this would:
+        // 1. Validate trade parameters
+        // 2. Call PancakeSwap adapter
+        // 3. Update vault state
+        // 4. Emit events
+        
+        // Placeholder implementation
+        let _ = vault_id;
+        let _ = trade_id;
+        let _ = token_in;
+        let _ = token_out;
+        let _ = amount_in;
+        let _ = amount_out;
+    }
+
+    // ===== VIEW FUNCTIONS =====
+
+    /// Get vault info
+    public fun get_vault_info(vault_id: u64): (u64, u64, u64, address, address, u64, bool) acquires VaultRegistry, VaultResource {
+        let vault_addr = get_vault_address(vault_id);
+        let vault = borrow_global<VaultResource>(vault_addr);
+        (
+            vault.total_shares,
+            vault.total_assets,
+            vault.id,
+            vault.denomination_asset,
+            vault.fund_manager,
+            vault.fee_rate,
+            vault.is_active,
+        )
+    }
+
+    /// Get USDT address
+    public fun get_usdt_address(): address {
+        USDT_ADDRESS
+    }
+} 

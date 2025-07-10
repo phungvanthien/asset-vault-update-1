@@ -1,0 +1,307 @@
+module vault::vault_comptroller {
+    use std::signer;
+    use std::vector;
+    use std::table::{Self, Table};
+    use aptos_framework::coin::{Self, Coin};
+    use aptos_framework::account;
+    use aptos_framework::timestamp;
+    use aptos_framework::event::{Self, EventHandle};
+    use std::debug;
+
+    use vault::vault_core;
+    use vault::pancakeswap_adapter;
+
+    // ===== ERRORS =====
+    const ENOT_FUND_MANAGER: u64 = 1;
+    const ENOT_VAULT_OWNER: u64 = 2;
+    const EINVALID_VAULT: u64 = 3;
+    const EINSUFFICIENT_BALANCE: u64 = 4;
+    const EINVALID_TRADE: u64 = 5;
+    const EVAULT_NOT_ACTIVE: u64 = 6;
+
+    // ===== STRUCTS =====
+
+    /// Comptroller resource (tương đương với Enzyme Comptroller)
+    struct ComptrollerResource has key {
+        id: u64,
+        vault_id: u64,
+        fund_manager: address,
+        vault_owner: address,
+        is_active: bool,
+        created_at: u64,
+        total_trades: u64,
+        total_volume: u64,
+        rebalance_events: EventHandle<RebalanceEvent>,
+        trade_events: EventHandle<TradeEvent>,
+    }
+
+    /// Trade execution data
+    struct TradeExecution has drop, store, copy {
+        trade_id: u64,
+        token_in: address,
+        token_out: address,
+        amount_in: u64,
+        amount_out: u64,
+        timestamp: u64,
+    }
+
+    /// Rebalance data
+    struct RebalanceData has drop, store, copy {
+        vault_id: u64,
+        trades_count: u64,
+        total_volume: u64,
+        timestamp: u64,
+    }
+
+    // ===== EVENTS =====
+
+    struct RebalanceEvent has drop, store {
+        comptroller_id: u64,
+        vault_id: u64,
+        fund_manager: address,
+        trades_count: u64,
+        total_volume: u64,
+        timestamp: u64,
+    }
+
+    struct TradeEvent has drop, store {
+        comptroller_id: u64,
+        trade_id: u64,
+        token_in: address,
+        token_out: address,
+        amount_in: u64,
+        amount_out: u64,
+        timestamp: u64,
+    }
+
+    // ===== INITIALIZATION =====
+
+    fun init_module(account: &signer) {
+        // Initialize comptroller registry
+        move_to(account, ComptrollerRegistry {
+            comptrollers: table::new(),
+            next_comptroller_id: 0,
+        });
+    }
+
+    // ===== COMPTROLLER MANAGEMENT =====
+
+    /// Create comptroller for a vault
+    public entry fun create_comptroller(
+        vault_owner: &signer,
+        vault_id: u64,
+        fund_manager: address,
+    ) {
+        let vault_owner_addr = signer::address_of(vault_owner);
+        
+        // Get next comptroller ID
+        let registry = borrow_global_mut<ComptrollerRegistry>(@vault);
+        let comptroller_id = registry.next_comptroller_id;
+        registry.next_comptroller_id = registry.next_comptroller_id + 1;
+        
+        // Register comptroller
+        table::add(&mut registry.comptrollers, comptroller_id, vault_owner_addr);
+        
+        // Initialize comptroller resource
+        move_to(vault_owner, ComptrollerResource {
+            id: comptroller_id,
+            vault_id,
+            fund_manager,
+            vault_owner: vault_owner_addr,
+            is_active: true,
+            created_at: timestamp::now_seconds(),
+            total_trades: 0,
+            total_volume: 0,
+            rebalance_events: event::new_event_handle<RebalanceEvent>(account::create_guid(vault_owner)),
+            trade_events: event::new_event_handle<TradeEvent>(account::create_guid(vault_owner)),
+        });
+    }
+
+    // ===== TRADE EXECUTION =====
+
+    /// Execute trade through comptroller (tương đương với executeCalls trong SushiAdapter)
+    public entry fun execute_trade(
+        fund_manager: &signer,
+        comptroller_id: u64,
+        trade_execution: TradeExecution,
+    ) acquires ComptrollerResource, ComptrollerRegistry {
+        let fund_manager_addr = signer::address_of(fund_manager);
+        
+        // Get comptroller
+        let comptroller = borrow_global_mut<ComptrollerResource>(get_comptroller_address_internal(comptroller_id));
+        
+        // Validate fund manager
+        assert!(comptroller.fund_manager == fund_manager_addr, ENOT_FUND_MANAGER);
+        assert!(comptroller.is_active, EVAULT_NOT_ACTIVE);
+        
+        // Execute trade through vault
+        let vault_id = comptroller.vault_id;
+        
+        // Call vault swap function
+        vault_core::execute_trade(
+            vault_id, 
+            trade_execution.trade_id, 
+            trade_execution.token_in, 
+            trade_execution.token_out, 
+            trade_execution.amount_in, 
+            trade_execution.amount_out
+        );
+        
+        // Update comptroller stats
+        comptroller.total_trades = comptroller.total_trades + 1;
+        comptroller.total_volume = comptroller.total_volume + trade_execution.amount_in;
+        
+        // Emit trade event
+        event::emit_event(&mut comptroller.trade_events, TradeEvent {
+            comptroller_id,
+            trade_id: trade_execution.trade_id,
+            token_in: trade_execution.token_in,
+            token_out: trade_execution.token_out,
+            amount_in: trade_execution.amount_in,
+            amount_out: trade_execution.amount_out,
+            timestamp: trade_execution.timestamp,
+        });
+    }
+
+    // ===== REBALANCE EXECUTION =====
+
+    /// Execute rebalance through comptroller
+    public entry fun execute_rebalance(
+        fund_manager: &signer,
+        comptroller_id: u64,
+        trades: vector<TradeExecution>,
+    ) acquires ComptrollerResource, ComptrollerRegistry {
+        let fund_manager_addr = signer::address_of(fund_manager);
+        
+        // Get comptroller
+        let comptroller = borrow_global_mut<ComptrollerResource>(get_comptroller_address_internal(comptroller_id));
+        
+        // Validate fund manager
+        assert!(comptroller.fund_manager == fund_manager_addr, ENOT_FUND_MANAGER);
+        assert!(comptroller.is_active, EVAULT_NOT_ACTIVE);
+        
+        // Execute all trades
+        let i = 0;
+        let total_volume = 0;
+        while (i < vector::length(&trades)) {
+            let trade = *vector::borrow(&trades, i);
+            // Call vault swap function directly instead of recursive call
+            vault_core::execute_trade(
+                comptroller.vault_id, 
+                trade.trade_id, 
+                trade.token_in, 
+                trade.token_out, 
+                trade.amount_in, 
+                trade.amount_out
+            );
+            total_volume = total_volume + trade.amount_in;
+            i = i + 1;
+        };
+        
+        // Update comptroller stats
+        comptroller.total_trades = comptroller.total_trades + vector::length(&trades);
+        comptroller.total_volume = comptroller.total_volume + total_volume;
+        
+        // Emit rebalance event
+        event::emit_event(&mut comptroller.rebalance_events, RebalanceEvent {
+            comptroller_id,
+            vault_id: comptroller.vault_id,
+            fund_manager: fund_manager_addr,
+            trades_count: vector::length(&trades),
+            total_volume,
+            timestamp: timestamp::now_seconds(),
+        });
+    }
+
+    // ===== VAULT MANAGEMENT =====
+
+    /// Buy shares in vault (tương đương với buyShares trong Comptroller)
+    public entry fun buy_shares(
+        user: &signer,
+        comptroller_id: u64,
+        amount: u64,
+        min_shares: u64,
+    ) acquires ComptrollerResource, ComptrollerRegistry {
+        let user_addr = signer::address_of(user);
+        
+        // Get comptroller
+        let comptroller = borrow_global<ComptrollerResource>(get_comptroller_address_internal(comptroller_id));
+        
+        // Validate comptroller
+        assert!(comptroller.is_active, EVAULT_NOT_ACTIVE);
+        
+        // Call vault deposit
+        vault_core::deposit<coin::USDT>(
+            user,
+            comptroller.vault_id,
+            amount,
+        );
+        
+        // Validate minimum shares received
+        let shares_received = vault_core::balance_of(user_addr, comptroller.vault_id);
+        assert!(shares_received >= min_shares, EINSUFFICIENT_BALANCE);
+    }
+
+    /// Sell shares from vault (tương đương với sellShares trong Comptroller)
+    public entry fun sell_shares(
+        user: &signer,
+        comptroller_id: u64,
+        shares: u64,
+        min_amount: u64,
+    ) acquires ComptrollerResource, ComptrollerRegistry {
+        let user_addr = signer::address_of(user);
+        
+        // Get comptroller
+        let comptroller = borrow_global<ComptrollerResource>(get_comptroller_address_internal(comptroller_id));
+        
+        // Validate comptroller
+        assert!(comptroller.is_active, EVAULT_NOT_ACTIVE);
+        
+        // Call vault withdraw
+        vault_core::withdraw<coin::USDT>(
+            user,
+            comptroller.vault_id,
+            shares,
+        );
+        
+        // Validate minimum amount received
+        let amount_received = vault_core::convert_to_assets(comptroller.vault_id, shares);
+        assert!(amount_received >= min_amount, EINSUFFICIENT_BALANCE);
+    }
+
+    // ===== VIEW FUNCTIONS =====
+
+    /// Get comptroller info
+    public fun get_comptroller_info(comptroller_id: u64): (u64, u64, address, address, bool, u64, u64) acquires ComptrollerResource, ComptrollerRegistry {
+        let comptroller = borrow_global<ComptrollerResource>(get_comptroller_address_internal(comptroller_id));
+        (
+            comptroller.id,
+            comptroller.vault_id,
+            comptroller.fund_manager,
+            comptroller.vault_owner,
+            comptroller.is_active,
+            comptroller.total_trades,
+            comptroller.total_volume,
+        )
+    }
+
+    /// Get comptroller address
+    public fun get_comptroller_address(comptroller_id: u64): address acquires ComptrollerRegistry {
+        let registry = borrow_global<ComptrollerRegistry>(@vault);
+        *table::borrow(&registry.comptrollers, comptroller_id)
+    }
+    
+    /// Get comptroller address for internal use
+    fun get_comptroller_address_internal(comptroller_id: u64): address acquires ComptrollerRegistry {
+        let registry = borrow_global<ComptrollerRegistry>(@vault);
+        *table::borrow(&registry.comptrollers, comptroller_id)
+    }
+
+    // ===== HELPER STRUCTS =====
+
+    /// Comptroller registry
+    struct ComptrollerRegistry has key {
+        comptrollers: Table<u64, address>, // comptroller_id -> comptroller_address
+        next_comptroller_id: u64,
+    }
+} 

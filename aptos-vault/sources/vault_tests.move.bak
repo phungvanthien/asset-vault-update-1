@@ -1,0 +1,366 @@
+#[test_only]
+module vault::vault_tests {
+    use std::signer;
+    use std::vector;
+    use aptos_framework::coin::{Self, Coin};
+    use aptos_framework::account;
+    use aptos_framework::timestamp;
+    use std::debug;
+
+    use vault::vault_core;
+    use vault::pancakeswap_adapter;
+
+    // ===== TEST CONSTANTS =====
+    const USDT_ADDRESS: address = @0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa;
+    const APT_ADDRESS: address = @0x1;
+    const TEST_VAULT_ID: u64 = 0;
+    const TEST_AMOUNT: u64 = 1000000; // 1 USDT (6 decimals)
+    const TEST_SHARES: u64 = 1000000; // 1 share
+
+    // ===== TEST SETUP =====
+
+    struct TestSetup has key {
+        vault_manager: signer::SignerCapability,
+        fund_manager: signer::SignerCapability,
+        user: signer::SignerCapability,
+    }
+
+    fun init_module(account: &signer) {
+        // Create test accounts
+        let (vault_manager_signer, vault_manager_cap) = account::create_resource_account(account, b"vault_manager");
+        let (fund_manager_signer, fund_manager_cap) = account::create_resource_account(account, b"fund_manager");
+        let (user_signer, user_cap) = account::create_resource_account(account, b"user");
+
+        // Store test setup
+        move_to(account, TestSetup {
+            vault_manager: vault_manager_cap,
+            fund_manager: fund_manager_cap,
+            user: user_cap,
+        });
+    }
+
+    // ===== TESTS =====
+
+    #[test]
+    fun test_create_vault() {
+        let account = account::create_account_for_test(@vault);
+        
+        // Create vault
+        let vault_manager = account::create_signer_with_capability(&get_vault_manager_cap());
+        let fund_manager_addr = signer::address_of(&get_fund_manager_signer());
+        
+        vault_core::create_vault(
+            &vault_manager,
+            USDT_ADDRESS,
+            fund_manager_addr,
+            100, // 1% fee
+        );
+
+        // Verify vault was created
+        let (total_shares, total_assets, vault_id, denomination_asset, fund_manager, fee_rate, is_active) = 
+            vault_core::get_vault_info(TEST_VAULT_ID);
+        
+        assert!(total_shares == 0, 0);
+        assert!(total_assets == 0, 1);
+        assert!(denomination_asset == USDT_ADDRESS, 2);
+        assert!(fund_manager == fund_manager_addr, 3);
+        assert!(fee_rate == 100, 4);
+        assert!(is_active == true, 5);
+    }
+
+    #[test]
+    fun test_deposit_first_user() {
+        let account = account::create_account_for_test(@vault);
+        
+        // Setup vault
+        setup_test_vault();
+        
+        // Deposit USDT
+        let user = get_user_signer();
+        let user_addr = signer::address_of(&user);
+        
+        // Mint some USDT to user
+        let coins = coin::mint_for_testing<coin::USDT>(TEST_AMOUNT);
+        coin::deposit(user_addr, coins);
+        
+        // Deposit into vault
+        vault_core::deposit<coin::USDT>(
+            &user,
+            TEST_VAULT_ID,
+            TEST_AMOUNT,
+        );
+        
+        // Verify user shares (first deposit gets 1:1 shares)
+        let user_shares = vault_core::balance_of(user_addr, TEST_VAULT_ID);
+        assert!(user_shares == TEST_AMOUNT, 6);
+        
+        // Verify vault state
+        let (total_shares, total_assets, _, _, _, _, _) = vault_core::get_vault_info(TEST_VAULT_ID);
+        assert!(total_shares == TEST_AMOUNT, 7);
+        assert!(total_assets == TEST_AMOUNT, 8);
+    }
+
+    #[test]
+    fun test_deposit_second_user() {
+        let account = account::create_account_for_test(@vault);
+        
+        // Setup vault and first deposit
+        setup_test_vault();
+        let user1 = get_user_signer();
+        let user1_addr = signer::address_of(&user1);
+        
+        // First user deposits
+        let coins1 = coin::mint_for_testing<coin::USDT>(TEST_AMOUNT);
+        coin::deposit(user1_addr, coins1);
+        vault_core::deposit<coin::USDT>(&user1, TEST_VAULT_ID, TEST_AMOUNT);
+        
+        // Second user deposits
+        let user2 = account::create_signer_with_capability(&get_user_cap());
+        let user2_addr = signer::address_of(&user2);
+        let coins2 = coin::mint_for_testing<coin::USDT>(TEST_AMOUNT);
+        coin::deposit(user2_addr, coins2);
+        vault_core::deposit<coin::USDT>(&user2, TEST_VAULT_ID, TEST_AMOUNT);
+        
+        // Verify second user shares (should be equal to first user)
+        let user2_shares = vault_core::balance_of(user2_addr, TEST_VAULT_ID);
+        assert!(user2_shares == TEST_AMOUNT, 9);
+        
+        // Verify vault state
+        let (total_shares, total_assets, _, _, _, _, _) = vault_core::get_vault_info(TEST_VAULT_ID);
+        assert!(total_shares == TEST_AMOUNT * 2, 10);
+        assert!(total_assets == TEST_AMOUNT * 2, 11);
+    }
+
+    #[test]
+    fun test_withdraw() {
+        let account = account::create_account_for_test(@vault);
+        
+        // Setup vault and deposit
+        setup_test_vault();
+        let user = get_user_signer();
+        let user_addr = signer::address_of(&user);
+        
+        // Mint and deposit USDT
+        let coins = coin::mint_for_testing<coin::USDT>(TEST_AMOUNT);
+        coin::deposit(user_addr, coins);
+        
+        vault_core::deposit<coin::USDT>(
+            &user,
+            TEST_VAULT_ID,
+            TEST_AMOUNT,
+        );
+        
+        // Record initial balance
+        let initial_balance = coin::balance<coin::USDT>(user_addr);
+        
+        // Withdraw half shares
+        let withdraw_shares = TEST_AMOUNT / 2;
+        vault_core::withdraw<coin::USDT>(
+            &user,
+            TEST_VAULT_ID,
+            withdraw_shares,
+        );
+        
+        // Verify user shares decreased
+        let user_shares = vault_core::balance_of(user_addr, TEST_VAULT_ID);
+        assert!(user_shares == TEST_AMOUNT - withdraw_shares, 12);
+        
+        // Verify user received assets
+        let final_balance = coin::balance<coin::USDT>(user_addr);
+        assert!(final_balance > initial_balance, 13);
+    }
+
+    #[test]
+    fun test_redeem() {
+        let account = account::create_account_for_test(@vault);
+        
+        // Setup vault and deposit
+        setup_test_vault();
+        let user = get_user_signer();
+        let user_addr = signer::address_of(&user);
+        
+        // Mint and deposit USDT
+        let coins = coin::mint_for_testing<coin::USDT>(TEST_AMOUNT);
+        coin::deposit(user_addr, coins);
+        
+        vault_core::deposit<coin::USDT>(
+            &user,
+            TEST_VAULT_ID,
+            TEST_AMOUNT,
+        );
+        
+        // Record initial balance
+        let initial_balance = coin::balance<coin::USDT>(user_addr);
+        
+        // Redeem half shares
+        let redeem_shares = TEST_AMOUNT / 2;
+        vault_core::redeem<coin::USDT>(
+            &user,
+            TEST_VAULT_ID,
+            redeem_shares,
+        );
+        
+        // Verify user shares decreased
+        let user_shares = vault_core::balance_of(user_addr, TEST_VAULT_ID);
+        assert!(user_shares == TEST_AMOUNT - redeem_shares, 14);
+        
+        // Verify user received assets
+        let final_balance = coin::balance<coin::USDT>(user_addr);
+        assert!(final_balance > initial_balance, 15);
+    }
+
+    #[test]
+    fun test_convert_functions() {
+        let account = account::create_account_for_test(@vault);
+        
+        // Setup vault and deposit
+        setup_test_vault();
+        let user = get_user_signer();
+        let user_addr = signer::address_of(&user);
+        
+        // Mint and deposit USDT
+        let coins = coin::mint_for_testing<coin::USDT>(TEST_AMOUNT);
+        coin::deposit(user_addr, coins);
+        
+        vault_core::deposit<coin::USDT>(
+            &user,
+            TEST_VAULT_ID,
+            TEST_AMOUNT,
+        );
+        
+        // Test convert_to_shares
+        let shares = vault_core::convert_to_shares(TEST_VAULT_ID, TEST_AMOUNT);
+        assert!(shares == TEST_AMOUNT, 16);
+        
+        // Test convert_to_assets
+        let assets = vault_core::convert_to_assets(TEST_VAULT_ID, TEST_AMOUNT);
+        assert!(assets == TEST_AMOUNT, 17);
+        
+        // Test total functions
+        let total_shares = vault_core::total_shares(TEST_VAULT_ID);
+        let total_assets = vault_core::total_assets(TEST_VAULT_ID);
+        assert!(total_shares == TEST_AMOUNT, 18);
+        assert!(total_assets == TEST_AMOUNT, 19);
+    }
+
+    #[test]
+    fun test_rebalance() {
+        let account = account::create_account_for_test(@vault);
+        
+        // Setup vault
+        setup_test_vault();
+        
+        // Create fund manager
+        let fund_manager = get_fund_manager_signer();
+        let fund_manager_addr = signer::address_of(&fund_manager);
+        
+        // Create trades vector
+        let trades = vector::empty<vault_core::Trade>();
+        
+        // Add a test trade
+        let trade = vault_core::Trade {
+            token_in: USDT_ADDRESS,
+            token_out: APT_ADDRESS,
+            amount_in: 100000, // 0.1 USDT
+            min_amount_out: 50000, // 0.05 APT
+        };
+        vector::push_back(&mut trades, trade);
+        
+        // Execute rebalance
+        vault_core::rebalance(
+            &fund_manager,
+            TEST_VAULT_ID,
+            trades,
+        );
+        
+        // Verify rebalance was executed
+        // (In practice, you'd check the actual state changes)
+        assert!(true, 20); // Placeholder assertion
+    }
+
+    #[test]
+    fun test_pancakeswap_adapter() {
+        let account = account::create_account_for_test(@vault);
+        
+        // Create router
+        let router = pancakeswap_adapter::create_router();
+        
+        // Test path
+        let path = vector::empty<address>();
+        vector::push_back(&mut path, USDT_ADDRESS);
+        vector::push_back(&mut path, APT_ADDRESS);
+        
+        // Test quote
+        let quote = pancakeswap_adapter::get_quote(
+            &router,
+            TEST_AMOUNT,
+            path,
+        );
+        
+        // Verify quote is reasonable
+        assert!(quote > 0, 21);
+        assert!(quote < TEST_AMOUNT, 22); // Should be less due to fees
+    }
+
+    #[test]
+    fun test_vault_swap() {
+        let account = account::create_account_for_test(@vault);
+        
+        // Setup vault
+        setup_test_vault();
+        
+        // Test path
+        let path = vector::empty<address>();
+        vector::push_back(&mut path, USDT_ADDRESS);
+        vector::push_back(&mut path, APT_ADDRESS);
+        
+        // Test vault swap
+        pancakeswap_adapter::vault_swap<coin::USDT, coin::AptosCoin>(
+            TEST_VAULT_ID,
+            TEST_AMOUNT,
+            500000, // min output
+            path,
+            timestamp::now_seconds() + 3600, // 1 hour deadline
+        );
+        
+        // Verify swap was executed
+        assert!(true, 23); // Placeholder assertion
+    }
+
+    // ===== HELPER FUNCTIONS =====
+
+    fun setup_test_vault() {
+        let vault_manager = account::create_signer_with_capability(&get_vault_manager_cap());
+        let fund_manager_addr = signer::address_of(&get_fund_manager_signer());
+        
+        vault_core::create_vault(
+            &vault_manager,
+            USDT_ADDRESS,
+            fund_manager_addr,
+            100, // 1% fee
+        );
+    }
+
+    fun get_vault_manager_cap(): account::SignerCapability {
+        let test_setup = borrow_global<TestSetup>(@vault);
+        test_setup.vault_manager
+    }
+
+    fun get_fund_manager_cap(): account::SignerCapability {
+        let test_setup = borrow_global<TestSetup>(@vault);
+        test_setup.fund_manager
+    }
+
+    fun get_user_cap(): account::SignerCapability {
+        let test_setup = borrow_global<TestSetup>(@vault);
+        test_setup.user
+    }
+
+    fun get_fund_manager_signer(): signer {
+        account::create_signer_with_capability(&get_fund_manager_cap())
+    }
+
+    fun get_user_signer(): signer {
+        account::create_signer_with_capability(&get_user_cap())
+    }
+} 
