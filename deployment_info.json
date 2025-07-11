@@ -1,0 +1,20 @@
+{
+  "vault_address": "0xb380dc1036ffeed2f2fe06977a17275e4a71d9ca3a3df58b370aa7faba336c4d",
+  "apt_token_address": "0x1::aptos_coin::AptosCoin",
+  "usdt_token_address": "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa",
+  "pancakeswap_router": "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299405d018d7e18f75ac2b0e95f60",
+  "network": "mainnet",
+  "deployed_at": "2024-07-11T15:30:00Z",
+  "transaction_hash": "0xfb7bb4db076e56236fc3ff463609867559357cadf933ed2de8930b129cc27d2b",
+  "explorer_url": "https://explorer.aptoslabs.com/txn/0xfb7bb4db076e56236fc3ff463609867559357cadf933ed2de8930b129cc27d2b?network=mainnet",
+  "account_explorer_url": "https://explorer.aptoslabs.com/account/0xb380dc1036ffeed2f2fe06977a17275e4a71d9ca3a3df58b370aa7faba336c4d?network=mainnet",
+  "gas_used": 10629,
+  "gas_price": 100,
+  "total_cost_apt": 1.0629,
+  "modules": [
+    "pancakeswap_adapter",
+    "vault",
+    "vault_core_simple",
+    "vault_integration"
+  ]
+} 

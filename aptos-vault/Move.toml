@@ -1,5 +1,5 @@
 [package]
-name = "AptosVault"
+name = "DexonicAssetVault"
 version = "1.0.0"
 authors = ["Your Name <your.email@example.com>"]
 upgrade_policy = "compatible"
@@ -8,6 +8,6 @@ upgrade_policy = "compatible"
 AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-framework/", rev = "main" }
 
 [addresses]
-vault = "0x2fdd1d8c08c6d2e447cffd67419cd9f0d53bedd003e5a6ee427b649f0c1077ef"
+vault = "0xb380dc1036ffeed2f2fe06977a17275e4a71d9ca3a3df58b370aa7faba336c4d"
 std = "0x1"
 aptos_framework = "0x1" 
