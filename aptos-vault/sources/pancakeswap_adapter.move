@@ -2,34 +2,32 @@ module vault::pancakeswap_adapter {
     use std::signer;
     use std::vector;
     use aptos_framework::timestamp;
+    use aptos_framework::coin::{Self, Coin};
+    use aptos_framework::account;
 
-    // PancakeSwap router address on Aptos Mainnet
+    // PancakeSwap Router address on Mainnet
     const PANCAKESWAP_ROUTER: address = @0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299405d018d7e18f75ac2b0e95f60;
     
-    // USDT address on Aptos Mainnet
+    // Token addresses
     const USDT_ADDRESS: address = @0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa;
-    
-    // APT address
     const APT_ADDRESS: address = @0x1;
 
-    // Router storage
+    // Router storage for managing swap state
     struct RouterStorage has key {
         router_address: address,
         owner: address,
         is_active: bool,
+        total_swaps: u64,
+        total_volume: u64,
+        last_swap_timestamp: u64,
     }
 
-    // Swap path
-    struct SwapPath has drop, store {
-        path: vector<address>,
-    }
-
-    // Swap result
-    struct SwapResult has drop, store {
-        input_amount: u64,
-        output_amount: u64,
-        path: vector<address>,
-        timestamp: u64,
+    // Token approval storage
+    struct TokenApproval has key {
+        token_address: address,
+        spender: address,
+        amount: u64,
+        approved_at: u64,
     }
 
     // Swap event
@@ -39,280 +37,33 @@ module vault::pancakeswap_adapter {
         output_token: address,
         input_amount: u64,
         output_amount: u64,
-        path: vector<address>,
         timestamp: u64,
-    }
-
-    // Quote event
-    struct QuoteEvent has drop, store {
-        input_token: address,
-        output_token: address,
-        input_amount: u64,
-        output_amount: u64,
-        path: vector<address>,
-        timestamp: u64,
+        slippage: u64,
     }
 
     // Error codes
-    const EINVALID_ROUTER: u64 = 1;
-    const EINVALID_PATH: u64 = 2;
-    const EINSUFFICIENT_OUTPUT: u64 = 3;
-    const EZERO_AMOUNT: u64 = 4;
-    const EROUTER_NOT_ACTIVE: u64 = 5;
-    const EINVALID_DEADLINE: u64 = 6;
-    const EINSUFFICIENT_LIQUIDITY: u64 = 7;
+    const EROUTER_NOT_ACTIVE: u64 = 1;
+    const EINSUFFICIENT_BALANCE: u64 = 2;
+    const EEXCESSIVE_SLIPPAGE: u64 = 3;
+    const EINVALID_PATH: u64 = 4;
+    const EAPPROVAL_REQUIRED: u64 = 5;
+    const EINVALID_AMOUNT: u64 = 6;
 
-    // Initialize module
-    fun init_module(account: &signer) {
-        // Module initialization logic can be added here
-    }
-
-    // Create router storage
-    public entry fun create_router(
-        owner: &signer,
-    ) {
+    // Initialize router storage
+    public entry fun initialize_router(owner: &signer) {
         let owner_addr = signer::address_of(owner);
         
         move_to(owner, RouterStorage {
             router_address: PANCAKESWAP_ROUTER,
             owner: owner_addr,
             is_active: true,
+            total_swaps: 0,
+            total_volume: 0,
+            last_swap_timestamp: 0,
         });
     }
 
-    // Get router address
-    public fun get_router_address(router_storage: &RouterStorage): address {
-        router_storage.router_address
-    }
-
-    // Get quote for swap (simplified implementation)
-    public fun get_quote(
-        input_token: address,
-        output_token: address,
-        amount_in: u64,
-    ): u64 {
-        if (amount_in == 0) {
-            return 0
-        };
-        
-        // Simplified quote calculation
-        // In a real implementation, this would call PancakeSwap router's getAmountsOut
-        if (input_token == USDT_ADDRESS && output_token == APT_ADDRESS) {
-            // USDT to APT: 1:1 ratio for demo
-            amount_in
-        } else if (input_token == APT_ADDRESS && output_token == USDT_ADDRESS) {
-            // APT to USDT: 1:1 ratio for demo
-            amount_in
-        } else {
-            // Default: 1:1 ratio
-            amount_in
-        }
-    }
-
-    // Get quote with path
-    public fun get_quote_with_path(
-        amount_in: u64,
-        path: vector<address>,
-    ): u64 {
-        if (amount_in == 0 || path.length() < 2) {
-            return 0
-        };
-        
-        let input_token = *vector::borrow(&path, 0);
-        let output_token = *vector::borrow(&path, path.length() - 1);
-        
-        get_quote(input_token, output_token, amount_in)
-    }
-
-    // Swap tokens with exact input
-    public entry fun swap_exact_tokens_for_tokens(
-        user: &signer,
-        amount_in: u64,
-        amount_out_min: u64,
-        path: vector<address>,
-        deadline: u64,
-    ) {
-        if (amount_in == 0) {
-            return
-        };
-        
-        if (path.length() < 2) {
-            return
-        };
-        
-        if (deadline < timestamp::now_seconds()) {
-            return
-        };
-        
-        let user_addr = signer::address_of(user);
-        let output_amount = get_quote_with_path(amount_in, path);
-        
-        if (output_amount < amount_out_min) {
-            return
-        };
-        
-        // In a real implementation, this would execute the swap on PancakeSwap
-        // For now, we just validate the parameters and emit an event
-        
-        // Emit swap event
-        let swap_event = SwapEvent {
-            user: user_addr,
-            input_token: *vector::borrow(&path, 0),
-            output_token: *vector::borrow(&path, path.length() - 1),
-            input_amount: amount_in,
-            output_amount: output_amount,
-            path: path,
-            timestamp: timestamp::now_seconds(),
-        };
-    }
-
-    // Swap tokens with exact output
-    public entry fun swap_tokens_for_exact_tokens(
-        user: &signer,
-        amount_out: u64,
-        amount_in_max: u64,
-        path: vector<address>,
-        deadline: u64,
-    ) {
-        if (amount_out == 0) {
-            return
-        };
-        
-        if (path.length() < 2) {
-            return
-        };
-        
-        if (deadline < timestamp::now_seconds()) {
-            return
-        };
-        
-        let user_addr = signer::address_of(user);
-        let input_token = *vector::borrow(&path, 0);
-        let output_token = *vector::borrow(&path, path.length() - 1);
-        
-        // Calculate required input amount (simplified)
-        let required_input = amount_out; // 1:1 ratio for demo
-        
-        if (required_input > amount_in_max) {
-            return
-        };
-        
-        // Emit swap event
-        let swap_event = SwapEvent {
-            user: user_addr,
-            input_token: input_token,
-            output_token: output_token,
-            input_amount: required_input,
-            output_amount: amount_out,
-            path: path,
-            timestamp: timestamp::now_seconds(),
-        };
-    }
-
-    // Swap APT for USDT
-    public entry fun swap_apt_for_usdt(
-        user: &signer,
-        apt_amount: u64,
-    ) {
-        let path = vector::empty<address>();
-        vector::push_back(&mut path, APT_ADDRESS);
-        vector::push_back(&mut path, USDT_ADDRESS);
-        
-        swap_exact_tokens_for_tokens(user, apt_amount, 0, path, timestamp::now_seconds() + 3600);
-    }
-
-    // Swap USDT for APT
-    public entry fun swap_usdt_for_apt(
-        user: &signer,
-        usdt_amount: u64,
-    ) {
-        let path = vector::empty<address>();
-        vector::push_back(&mut path, USDT_ADDRESS);
-        vector::push_back(&mut path, APT_ADDRESS);
-        
-        swap_exact_tokens_for_tokens(user, usdt_amount, 0, path, timestamp::now_seconds() + 3600);
-    }
-
-    // Vault swap function (for vault integration)
-    public entry fun vault_swap(
-        vault_user: &signer,
-        amount_in: u64,
-        amount_out_min: u64,
-        path: vector<address>,
-        deadline: u64,
-    ) {
-        swap_exact_tokens_for_tokens(vault_user, amount_in, amount_out_min, path, deadline)
-    }
-
-    // Get amounts out (PancakeSwap equivalent)
-    #[view]
-    public fun get_amounts_out(
-        amount_in: u64,
-        path: vector<address>,
-    ): vector<u64> {
-        if (amount_in == 0 || path.length() < 2) {
-            return vector::empty<u64>()
-        };
-        
-        let amounts = vector::empty<u64>();
-        vector::push_back(&mut amounts, amount_in);
-        
-        let output_amount = get_quote_with_path(amount_in, path);
-        vector::push_back(&mut amounts, output_amount);
-        
-        amounts
-    }
-
-    // Get amounts in (PancakeSwap equivalent)
-    #[view]
-    public fun get_amounts_in(
-        amount_out: u64,
-        path: vector<address>,
-    ): vector<u64> {
-        if (amount_out == 0 || path.length() < 2) {
-            return vector::empty<u64>()
-        };
-        
-        let amounts = vector::empty<u64>();
-        let input_amount = amount_out; // 1:1 ratio for demo
-        vector::push_back(&mut amounts, input_amount);
-        vector::push_back(&mut amounts, amount_out);
-        
-        amounts
-    }
-
-    // Check if router is active
-    #[view]
-    public fun is_router_active(router_addr: address): bool {
-        // In a real implementation, this would check the router contract
-        true
-    }
-
-    // Get router info
-    #[view]
-    public fun get_router_info(): (address, bool) {
-        (PANCAKESWAP_ROUTER, true)
-    }
-
-    // Get USDT address
-    #[view]
-    public fun get_usdt_address(): address {
-        USDT_ADDRESS
-    }
-
-    // Get APT address
-    #[view]
-    public fun get_apt_address(): address {
-        APT_ADDRESS
-    }
-
-    // Get PancakeSwap router address
-    #[view]
-    public fun get_pancakeswap_router(): address {
-        PANCAKESWAP_ROUTER
-    }
-
-    // Set router active status (owner only)
+    // Set router active status
     public entry fun set_router_active(owner: &signer, is_active: bool) acquires RouterStorage {
         let owner_addr = signer::address_of(owner);
         
@@ -320,12 +71,233 @@ module vault::pancakeswap_adapter {
             return
         };
         
-        let router_storage = borrow_global_mut<RouterStorage>(owner_addr);
+        let router = borrow_global_mut<RouterStorage>(owner_addr);
         
-        if (router_storage.owner != owner_addr) {
+        if (router.owner != owner_addr) {
             return
         };
         
-        router_storage.is_active = is_active;
+        router.is_active = is_active;
+    }
+
+    // Get router address
+    #[view]
+    public fun get_pancakeswap_router(): address {
+        PANCAKESWAP_ROUTER
+    }
+
+    // Get quote for swap
+    #[view]
+    public fun get_quote(
+        input_token: address,
+        output_token: address,
+        amount_in: u64
+    ): u64 {
+        // In a real implementation, this would query PancakeSwap's getAmountsOut
+        // For now, we'll use a simple 1:1 ratio as placeholder
+        if (input_token == APT_ADDRESS && output_token == USDT_ADDRESS) {
+            amount_in  // 1:1 ratio for demo
+        } else if (input_token == USDT_ADDRESS && output_token == APT_ADDRESS) {
+            amount_in  // 1:1 ratio for demo
+        } else {
+            0
+        }
+    }
+
+    // Swap exact tokens for tokens
+    public entry fun swap_exact_tokens_for_tokens(
+        user: &signer,
+        amount_in: u64,
+        amount_out_min: u64,
+        path: vector<address>,
+        to: address,
+        deadline: u64
+    ) acquires RouterStorage {
+        let user_addr = signer::address_of(user);
+        
+        // Check if router is active
+        if (!exists<RouterStorage>(user_addr)) {
+            return
+        };
+        
+        let router = borrow_global_mut<RouterStorage>(user_addr);
+        
+        if (!router.is_active) {
+            return
+        };
+
+        // Validate deadline
+        if (timestamp::now_seconds() > deadline) {
+            return
+        };
+
+        // Validate path
+        if (vector::length(&path) < 2) {
+            return
+        };
+
+        let input_token = *vector::borrow(&path, 0);
+        let output_token = *vector::borrow(&path, vector::length(&path) - 1);
+
+        // Get quote
+        let expected_output = get_quote(input_token, output_token, amount_in);
+        
+        // Check slippage
+        if (expected_output < amount_out_min) {
+            return
+        };
+
+        // Check if user has sufficient balance
+        if (input_token == APT_ADDRESS) {
+            let apt_balance = coin::balance<coin::AptosCoin>(user_addr);
+            if (apt_balance < amount_in) {
+                return
+            };
+        } else if (input_token == USDT_ADDRESS) {
+            // Check USDT balance (would need proper USDT coin type)
+            // For now, we'll assume sufficient balance
+        };
+
+        // Execute swap (simplified - in real implementation, this would call PancakeSwap)
+        // For demo purposes, we'll just update the router stats
+        
+        router.total_swaps = router.total_swaps + 1;
+        router.total_volume = router.total_volume + amount_in;
+        router.last_swap_timestamp = timestamp::now_seconds();
+
+        // Emit swap event
+        let swap_event = SwapEvent {
+            user: user_addr,
+            input_token: input_token,
+            output_token: output_token,
+            input_amount: amount_in,
+            output_amount: expected_output,
+            timestamp: timestamp::now_seconds(),
+            slippage: if (expected_output > 0) {
+                ((expected_output - amount_out_min) * 10000) / expected_output
+            } else {
+                0
+            },
+        };
+
+        // In a real implementation, you would emit this event
+        // event::emit(swap_event_handle, swap_event);
+    }
+
+    // Swap APT for USDT
+    public entry fun swap_apt_for_usdt(
+        user: &signer,
+        apt_amount: u64,
+        min_usdt_amount: u64
+    ) acquires RouterStorage {
+        let path = vector::empty<address>();
+        vector::push_back(&mut path, APT_ADDRESS);
+        vector::push_back(&mut path, USDT_ADDRESS);
+        
+        swap_exact_tokens_for_tokens(
+            user,
+            apt_amount,
+            min_usdt_amount,
+            path,
+            signer::address_of(user),
+            timestamp::now_seconds() + 3600
+        );
+    }
+
+    // Swap USDT for APT
+    public entry fun swap_usdt_for_apt(
+        user: &signer,
+        usdt_amount: u64,
+        min_apt_amount: u64
+    ) acquires RouterStorage {
+        let path = vector::empty<address>();
+        vector::push_back(&mut path, USDT_ADDRESS);
+        vector::push_back(&mut path, APT_ADDRESS);
+        
+        swap_exact_tokens_for_tokens(
+            user,
+            usdt_amount,
+            min_apt_amount,
+            path,
+            signer::address_of(user),
+            timestamp::now_seconds() + 3600
+        );
+    }
+
+    // Get router stats
+    #[view]
+    public fun get_router_stats(owner_addr: address): (address, bool, u64, u64, u64) acquires RouterStorage {
+        if (!exists<RouterStorage>(owner_addr)) {
+            return (@0x0, false, 0, 0, 0)
+        };
+        
+        let router = borrow_global<RouterStorage>(owner_addr);
+        (router.router_address, router.is_active, router.total_swaps, router.total_volume, router.last_swap_timestamp)
+    }
+
+    // Approve token for swap
+    public entry fun approve_token(
+        user: &signer,
+        token_address: address,
+        spender: address,
+        amount: u64
+    ) {
+        let user_addr = signer::address_of(user);
+        
+        move_to(user, TokenApproval {
+            token_address: token_address,
+            spender: spender,
+            amount: amount,
+            approved_at: timestamp::now_seconds(),
+        });
+    }
+
+    // Check token approval
+    #[view]
+    public fun check_approval(
+        user_addr: address,
+        token_address: address,
+        spender: address
+    ): (bool, u64) acquires TokenApproval {
+        if (!exists<TokenApproval>(user_addr)) {
+            return (false, 0)
+        };
+        
+        let approval = borrow_global<TokenApproval>(user_addr);
+        
+        if (approval.token_address == token_address && approval.spender == spender) {
+            (true, approval.amount)
+        } else {
+            (false, 0)
+        }
+    }
+
+    // Calculate slippage
+    #[view]
+    public fun calculate_slippage(
+        expected_amount: u64,
+        actual_amount: u64
+    ): u64 {
+        if (expected_amount == 0) {
+            return 0
+        };
+        
+        if (actual_amount >= expected_amount) {
+            0
+        } else {
+            ((expected_amount - actual_amount) * 10000) / expected_amount
+        }
+    }
+
+    // Get optimal swap path
+    #[view]
+    public fun get_optimal_path(
+        input_token: address,
+        output_token: address
+    ): vector<address> {
+        let path = vector::empty<address>();
+        vector::push_back(&mut path, input_token);
+        vector::push_back(&mut path, output_token);
+        path
     }
 } 

@@ -1,6 +1,13 @@
 module vault::vault_core_simple {
     use std::signer;
+    use std::vector;
     use aptos_framework::timestamp;
+    use aptos_framework::coin::{Self, Coin};
+    use aptos_framework::account;
+
+    // USDT address on Aptos Mainnet
+    const USDT_ADDRESS: address = @0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa;
+    const APT_ADDRESS: address = @0x1;
 
     // Vault storage for managing shares
     struct VaultStorage has key {
@@ -10,6 +17,8 @@ module vault::vault_core_simple {
         created_at: u64,
         last_rebalance: u64,
         fee_rate: u64, // in basis points
+        total_usdt: u64,
+        total_apt: u64,
     }
 
     // Vault shares for tracking user ownership
@@ -33,6 +42,8 @@ module vault::vault_core_simple {
         apt_balance: u64,
         total_value: u64,
         last_update: u64,
+        total_deposits: u64,
+        total_withdrawals: u64,
     }
 
     // Rebalance strategy
@@ -51,6 +62,35 @@ module vault::vault_core_simple {
         timestamp: u64,
     }
 
+    // Deposit event
+    struct DepositEvent has drop, store {
+        user: address,
+        amount: u64,
+        shares_minted: u64,
+        timestamp: u64,
+        vault_total_shares: u64,
+        vault_total_usdt: u64,
+    }
+
+    // Withdraw event
+    struct WithdrawEvent has drop, store {
+        user: address,
+        amount: u64,
+        shares_burned: u64,
+        timestamp: u64,
+        vault_total_shares: u64,
+        vault_total_usdt: u64,
+    }
+
+    // Rebalance event
+    struct RebalanceEvent has drop, store {
+        usdt_amount: u64,
+        apt_amount: u64,
+        timestamp: u64,
+        target_ratio: u64,
+        current_ratio: u64,
+    }
+
     // Error codes
     const EINSUFFICIENT_SHARES: u64 = 2;
     const EZERO_AMOUNT: u64 = 3;
@@ -59,6 +99,7 @@ module vault::vault_core_simple {
     const EVAULT_NOT_ACTIVE: u64 = 6;
     const EINVALID_FEE_RATE: u64 = 7;
     const EINSUFFICIENT_BALANCE: u64 = 8;
+    const EINVALID_SHARE_CALCULATION: u64 = 9;
 
     // Initialize vault module
     fun init_module(account: &signer) {
@@ -79,6 +120,8 @@ module vault::vault_core_simple {
             created_at: timestamp::now_seconds(),
             last_rebalance: 0,
             fee_rate: 100, // 1% fee
+            total_usdt: 0,
+            total_apt: 0,
         });
 
         // Create vault manager capability
@@ -93,6 +136,8 @@ module vault::vault_core_simple {
             apt_balance: 0,
             total_value: 0,
             last_update: timestamp::now_seconds(),
+            total_deposits: 0,
+            total_withdrawals: 0,
         });
     }
 
@@ -107,32 +152,42 @@ module vault::vault_core_simple {
             return
         };
 
-        let vault_storage = borrow_global_mut<VaultStorage>(user_addr);
-        
-        if (!vault_storage.is_active) {
+        // Check if vault exists
+        if (!exists<VaultStorage>(user_addr)) {
             return
         };
 
-        // Calculate shares to mint (ERC4626 formula with fee)
-        let shares_to_mint = if (vault_storage.total_shares == 0) {
-            // First deposit
-            amount
-        } else {
-            // Calculate proportional shares with fee
-            let fee_amount = (amount * vault_storage.fee_rate) / 10000;
-            let net_amount = amount - fee_amount;
-            (net_amount * vault_storage.total_shares) / vault_storage.total_shares
+        let vault = borrow_global_mut<VaultStorage>(user_addr);
+        
+        if (!vault.is_active) {
+            return
         };
-        
-        // Update vault storage
-        vault_storage.total_shares = vault_storage.total_shares + shares_to_mint;
-        
-        // Update asset pool
+
         let asset_pool = borrow_global_mut<AssetPool>(user_addr);
-        asset_pool.usdt_balance = asset_pool.usdt_balance + amount;
-        asset_pool.total_value = asset_pool.total_value + amount;
-        asset_pool.last_update = timestamp::now_seconds();
         
+        // Calculate shares to mint
+        let shares_to_mint = if (vault.total_shares == 0) {
+            amount // First deposit: 1:1 ratio
+        } else {
+            // Calculate shares based on current vault value
+            let total_value = asset_pool.usdt_balance + asset_pool.apt_balance;
+            if (total_value == 0) {
+                return
+            };
+            (amount * vault.total_shares) / total_value
+        };
+
+        if (shares_to_mint == 0) {
+            return
+        };
+
+        // Update vault state
+        vault.total_shares = vault.total_shares + shares_to_mint;
+        asset_pool.usdt_balance = asset_pool.usdt_balance + amount;
+        asset_pool.total_value = asset_pool.usdt_balance + asset_pool.apt_balance;
+        asset_pool.total_deposits = asset_pool.total_deposits + amount;
+        asset_pool.last_update = timestamp::now_seconds();
+
         // Mint shares for user
         if (!exists<VaultShares>(user_addr)) {
             move_to(user, VaultShares {
@@ -148,9 +203,22 @@ module vault::vault_core_simple {
             user_shares.last_deposit = timestamp::now_seconds();
             user_shares.total_deposited = user_shares.total_deposited + amount;
         };
+
+        // Emit deposit event
+        let deposit_event = DepositEvent {
+            user: user_addr,
+            amount: amount,
+            shares_minted: shares_to_mint,
+            timestamp: timestamp::now_seconds(),
+            vault_total_shares: vault.total_shares,
+            vault_total_usdt: asset_pool.usdt_balance,
+        };
+
+        // In a real implementation, you would emit this event
+        // event::emit(deposit_event_handle, deposit_event);
     }
 
-    // Burn shares from user (ERC4626 equivalent)
+    // Burn shares for user (ERC4626 equivalent)
     public entry fun burn_shares(
         user: &signer,
         shares_to_burn: u64,
@@ -161,172 +229,161 @@ module vault::vault_core_simple {
             return
         };
 
+        // Check if vault exists
+        if (!exists<VaultStorage>(user_addr)) {
+            return
+        };
+
+        let vault = borrow_global_mut<VaultStorage>(user_addr);
+        
+        if (!vault.is_active) {
+            return
+        };
+
         // Check if user has enough shares
         if (!exists<VaultShares>(user_addr)) {
             return
         };
 
         let user_shares = borrow_global_mut<VaultShares>(user_addr);
+        
         if (user_shares.shares < shares_to_burn) {
             return
         };
 
-        let vault_storage = borrow_global_mut<VaultStorage>(user_addr);
+        let asset_pool = borrow_global_mut<AssetPool>(user_addr);
         
-        if (!vault_storage.is_active) {
+        // Calculate amount to withdraw
+        let total_value = asset_pool.usdt_balance + asset_pool.apt_balance;
+        let amount_to_withdraw = if (vault.total_shares == 0) {
+            return
+        } else {
+            (shares_to_burn * total_value) / vault.total_shares
+        };
+
+        if (amount_to_withdraw == 0) {
             return
         };
 
-        // Calculate USDT to withdraw (ERC4626 formula)
-        let usdt_to_withdraw = if (vault_storage.total_shares > 0) {
-            (shares_to_burn * vault_storage.total_shares) / vault_storage.total_shares
-        } else {
-            0
+        // Check if vault has enough balance
+        if (asset_pool.usdt_balance < amount_to_withdraw) {
+            return
         };
 
-        // Update vault storage
-        vault_storage.total_shares = vault_storage.total_shares - shares_to_burn;
-        
-        // Update asset pool
-        let asset_pool = borrow_global_mut<AssetPool>(user_addr);
-        asset_pool.usdt_balance = asset_pool.usdt_balance - usdt_to_withdraw;
-        asset_pool.total_value = asset_pool.total_value - usdt_to_withdraw;
+        // Update vault state
+        vault.total_shares = vault.total_shares - shares_to_burn;
+        asset_pool.usdt_balance = asset_pool.usdt_balance - amount_to_withdraw;
+        asset_pool.total_value = asset_pool.usdt_balance + asset_pool.apt_balance;
+        asset_pool.total_withdrawals = asset_pool.total_withdrawals + amount_to_withdraw;
         asset_pool.last_update = timestamp::now_seconds();
-        
-        // Burn shares
+
+        // Burn user shares
         user_shares.shares = user_shares.shares - shares_to_burn;
         user_shares.last_withdraw = timestamp::now_seconds();
-        user_shares.total_withdrawn = user_shares.total_withdrawn + usdt_to_withdraw;
+        user_shares.total_withdrawn = user_shares.total_withdrawn + amount_to_withdraw;
+
+        // Emit withdraw event
+        let withdraw_event = WithdrawEvent {
+            user: user_addr,
+            amount: amount_to_withdraw,
+            shares_burned: shares_to_burn,
+            timestamp: timestamp::now_seconds(),
+            vault_total_shares: vault.total_shares,
+            vault_total_usdt: asset_pool.usdt_balance,
+        };
+
+        // In a real implementation, you would emit this event
+        // event::emit(withdraw_event_handle, withdraw_event);
     }
 
-    // Rebalance vault assets
-    public entry fun rebalance_vault(
-        manager: &signer,
-        usdt_amount: u64,
-    ) acquires VaultStorage, AssetPool {
-        let manager_addr = signer::address_of(manager);
-        
-        if (!exists<VaultStorage>(manager_addr)) {
-            return
-        };
-
-        let vault_storage = borrow_global_mut<VaultStorage>(manager_addr);
-        
-        if (vault_storage.vault_manager != manager_addr) {
-            return
-        };
-
-        if (!vault_storage.is_active) {
-            return
-        };
-
-        let asset_pool = borrow_global_mut<AssetPool>(manager_addr);
-        
-        if (usdt_amount > asset_pool.usdt_balance) {
-            return
-        };
-
-        // Calculate target ratio (50% USDT, 50% APT)
-        let target_usdt_ratio = 5000; // 50% in basis points
-        let current_usdt_ratio = if (asset_pool.total_value > 0) {
-            (asset_pool.usdt_balance * 10000) / asset_pool.total_value
-        } else {
-            0
-        };
-
-        // Only rebalance if deviation is significant (>10%)
-        if (current_usdt_ratio > target_usdt_ratio + 1000 || current_usdt_ratio < target_usdt_ratio - 1000) {
-            // Calculate APT amount (simplified 1:1 ratio for demo)
-            let apt_amount = usdt_amount;
-            
-            // Update asset pool
-            asset_pool.usdt_balance = asset_pool.usdt_balance - usdt_amount;
-            asset_pool.apt_balance = asset_pool.apt_balance + apt_amount;
-            asset_pool.last_update = timestamp::now_seconds();
-            
-            vault_storage.last_rebalance = timestamp::now_seconds();
-        };
-    }
-
-    // Get user's share balance
+    // Convert assets to shares (ERC4626 convertToShares)
     #[view]
-    public fun get_balance(user_addr: address): u64 acquires VaultShares {
-        if (exists<VaultShares>(user_addr)) {
-            let user_shares = borrow_global<VaultShares>(user_addr);
-            user_shares.shares
-        } else {
-            0
-        }
-    }
-
-    // Get vault info
-    #[view]
-    public fun get_vault_info(vault_addr: address): (u64, u64, u64, bool, u64) acquires VaultStorage, AssetPool {
-        if (exists<VaultStorage>(vault_addr)) {
-            let vault_storage = borrow_global<VaultStorage>(vault_addr);
-            let asset_pool = borrow_global<AssetPool>(vault_addr);
-            (vault_storage.total_shares, asset_pool.usdt_balance, asset_pool.apt_balance, vault_storage.is_active, vault_storage.fee_rate)
-        } else {
-            (0, 0, 0, false, 0)
-        }
-    }
-
-    // Convert assets to shares (ERC4626 equivalent)
-    #[view]
-    public fun convert_to_shares(vault_addr: address, assets: u64): u64 acquires VaultStorage {
+    public fun convert_to_shares(
+        vault_addr: address,
+        assets: u64
+    ): u64 acquires VaultStorage, AssetPool {
         if (!exists<VaultStorage>(vault_addr)) {
             return 0
         };
+
+        let vault = borrow_global<VaultStorage>(vault_addr);
+        let asset_pool = borrow_global<AssetPool>(vault_addr);
         
-        let vault_storage = borrow_global<VaultStorage>(vault_addr);
-        
-        if (vault_storage.total_shares == 0) {
-            return assets
+        if (vault.total_shares == 0) {
+            return assets // First deposit: 1:1 ratio
         };
-        
-        // Apply fee
-        let fee_amount = (assets * vault_storage.fee_rate) / 10000;
-        let net_assets = assets - fee_amount;
-        
-        (net_assets * vault_storage.total_shares) / vault_storage.total_shares
+
+        let total_value = asset_pool.usdt_balance + asset_pool.apt_balance;
+        if (total_value == 0) {
+            return 0
+        };
+
+        (assets * vault.total_shares) / total_value
     }
 
-    // Convert shares to assets (ERC4626 equivalent)
+    // Convert shares to assets (ERC4626 convertToAssets)
     #[view]
-    public fun convert_to_assets(vault_addr: address, shares: u64): u64 acquires VaultStorage {
+    public fun convert_to_assets(
+        vault_addr: address,
+        shares: u64
+    ): u64 acquires VaultStorage, AssetPool {
         if (!exists<VaultStorage>(vault_addr)) {
             return 0
         };
+
+        let vault = borrow_global<VaultStorage>(vault_addr);
+        let asset_pool = borrow_global<AssetPool>(vault_addr);
         
-        let vault_storage = borrow_global<VaultStorage>(vault_addr);
-        
-        if (vault_storage.total_shares == 0) {
+        if (vault.total_shares == 0) {
             return 0
         };
-        
-        (shares * vault_storage.total_shares) / vault_storage.total_shares
+
+        let total_value = asset_pool.usdt_balance + asset_pool.apt_balance;
+        (shares * total_value) / vault.total_shares
     }
 
-    // Get total assets (ERC4626 equivalent)
+    // Get total assets (ERC4626 totalAssets)
     #[view]
     public fun total_assets(vault_addr: address): u64 acquires AssetPool {
         if (!exists<AssetPool>(vault_addr)) {
             return 0
         };
-        
+
         let asset_pool = borrow_global<AssetPool>(vault_addr);
-        asset_pool.total_value
+        asset_pool.usdt_balance + asset_pool.apt_balance
     }
 
-    // Get total shares (ERC4626 equivalent)
+    // Get total shares (ERC4626 totalSupply)
     #[view]
     public fun total_shares(vault_addr: address): u64 acquires VaultStorage {
         if (!exists<VaultStorage>(vault_addr)) {
             return 0
         };
-        
-        let vault_storage = borrow_global<VaultStorage>(vault_addr);
-        vault_storage.total_shares
+
+        let vault = borrow_global<VaultStorage>(vault_addr);
+        vault.total_shares
+    }
+
+    // Get vault manager
+    #[view]
+    public fun get_vault_manager(vault_addr: address): address acquires VaultStorage {
+        if (!exists<VaultStorage>(vault_addr)) {
+            return @0x0
+        };
+
+        let vault = borrow_global<VaultStorage>(vault_addr);
+        vault.vault_manager
+    }
+
+    // Get asset pool info
+    #[view]
+    public fun get_asset_pool_info(vault_addr: address): (u64, u64, u64, u64) acquires AssetPool {
+        if (!exists<AssetPool>(vault_addr)) {
+            return (0, 0, 0, 0)
+        };
+
+        let asset_pool = borrow_global<AssetPool>(vault_addr);
+        (asset_pool.usdt_balance, asset_pool.apt_balance, asset_pool.total_value, asset_pool.last_update)
     }
 
     // Set vault fee rate (manager only)
@@ -339,18 +396,18 @@ module vault::vault_core_simple {
         if (!exists<VaultStorage>(manager_addr)) {
             return
         };
+
+        let vault = borrow_global_mut<VaultStorage>(manager_addr);
         
-        let vault_storage = borrow_global_mut<VaultStorage>(manager_addr);
-        
-        if (vault_storage.vault_manager != manager_addr) {
+        if (vault.vault_manager != manager_addr) {
             return
         };
-        
+
         if (new_fee_rate > 1000) { // Max 10%
             return
         };
-        
-        vault_storage.fee_rate = new_fee_rate;
+
+        vault.fee_rate = new_fee_rate;
     }
 
     // Set vault active status (manager only)
@@ -363,35 +420,35 @@ module vault::vault_core_simple {
         if (!exists<VaultStorage>(manager_addr)) {
             return
         };
+
+        let vault = borrow_global_mut<VaultStorage>(manager_addr);
         
-        let vault_storage = borrow_global_mut<VaultStorage>(manager_addr);
-        
-        if (vault_storage.vault_manager != manager_addr) {
+        if (vault.vault_manager != manager_addr) {
             return
         };
-        
-        vault_storage.is_active = is_active;
+
+        vault.is_active = is_active;
     }
 
-    // Get vault manager
+    // Get user shares
     #[view]
-    public fun get_vault_manager(vault_addr: address): address acquires VaultStorage {
-        if (!exists<VaultStorage>(vault_addr)) {
-            return @0x0
+    public fun get_user_shares(user_addr: address): u64 acquires VaultShares {
+        if (!exists<VaultShares>(user_addr)) {
+            return 0
         };
-        
-        let vault_storage = borrow_global<VaultStorage>(vault_addr);
-        vault_storage.vault_manager
+
+        let user_shares = borrow_global<VaultShares>(user_addr);
+        user_shares.shares
     }
 
-    // Get asset pool info
+    // Get user balance info
     #[view]
-    public fun get_asset_pool_info(vault_addr: address): (u64, u64, u64, u64) acquires AssetPool {
-        if (!exists<AssetPool>(vault_addr)) {
+    public fun get_user_balance_info(user_addr: address): (u64, u64, u64, u64) acquires VaultShares {
+        if (!exists<VaultShares>(user_addr)) {
             return (0, 0, 0, 0)
         };
-        
-        let asset_pool = borrow_global<AssetPool>(vault_addr);
-        (asset_pool.usdt_balance, asset_pool.apt_balance, asset_pool.total_value, asset_pool.last_update)
+
+        let user_shares = borrow_global<VaultShares>(user_addr);
+        (user_shares.shares, user_shares.total_deposited, user_shares.total_withdrawn, user_shares.last_deposit)
     }
 } 

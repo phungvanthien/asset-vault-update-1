@@ -1,10 +1,13 @@
 module vault::vault {
     use std::signer;
+    use std::vector;
     use aptos_framework::timestamp;
+    use aptos_framework::coin::{Self, Coin};
+    use aptos_framework::account;
 
     // Vault configuration
-    const VAULT_NAME: vector<u8> = b"Aptos Vault";
-    const VAULT_SYMBOL: vector<u8> = b"VAULT";
+    const VAULT_NAME: vector<u8> = b"Dexonic Asset Vault";
+    const VAULT_SYMBOL: vector<u8> = b"DAV";
     const DECIMALS: u8 = 8;
     const INITIAL_SHARES: u64 = 100000000; // 1 share = 1e8
 
@@ -74,23 +77,20 @@ module vault::vault {
     }
 
     // Error codes
-    const EZERO_AMOUNT: u64 = 1;
+    const EINSUFFICIENT_BALANCE: u64 = 1;
     const EINSUFFICIENT_SHARES: u64 = 2;
-    const EINSUFFICIENT_BALANCE: u64 = 3;
-    const EVAULT_NOT_INITIALIZED: u64 = 4;
-    const EUSER_NOT_FOUND: u64 = 5;
-    const EVAULT_NOT_ACTIVE: u64 = 6;
-    const EINVALID_FEE_RATE: u64 = 7;
-    const EINSUFFICIENT_OUTPUT: u64 = 8;
-    const EINVALID_PATH: u64 = 9;
+    const EZERO_AMOUNT: u64 = 3;
+    const EVAULT_NOT_ACTIVE: u64 = 4;
+    const EACCESS_DENIED: u64 = 5;
+    const EINVALID_FEE_RATE: u64 = 6;
+    const EINVALID_SHARE_CALCULATION: u64 = 7;
 
     // Initialize vault
     public entry fun initialize_vault(owner: &signer) {
         let owner_addr = signer::address_of(owner);
         
-        // Create vault resource
         move_to(owner, VaultResource {
-            total_shares: INITIAL_SHARES,
+            total_shares: 0,
             total_usdt: 0,
             total_apt: 0,
             owner: owner_addr,
@@ -99,55 +99,51 @@ module vault::vault {
             fee_rate: 100, // 1% fee
             last_rebalance: 0,
         });
-
-        // Create user shares for owner
-        move_to(owner, UserShares {
-            shares: INITIAL_SHARES,
-            last_deposit: timestamp::now_seconds(),
-            last_withdraw: 0,
-            total_deposited: 0,
-            total_withdrawn: 0,
-        });
     }
 
-    // Deposit USDT into vault (ERC4626 equivalent)
+    // Deposit USDT into vault (ERC4626 deposit)
     public entry fun deposit(
         user: &signer,
         amount: u64,
     ) acquires VaultResource, UserShares {
+        let user_addr = signer::address_of(user);
+        
         if (amount == 0) {
             return
         };
 
-        let user_addr = signer::address_of(user);
+        // Check if vault exists
+        if (!exists<VaultResource>(@vault)) {
+            return
+        };
+
         let vault = borrow_global_mut<VaultResource>(@vault);
         
         if (!vault.is_active) {
             return
         };
 
-        // Calculate shares to mint (ERC4626 formula)
-        let shares_to_mint = if (vault.total_shares == INITIAL_SHARES && vault.total_usdt == 0) {
-            // First deposit
-            amount
+        // Calculate shares to mint with proper arithmetic
+        let shares_to_mint = if (vault.total_shares == 0) {
+            amount // First deposit: 1:1 ratio
         } else {
-            // Calculate proportional shares with fee
-            let fee_amount = (amount * vault.fee_rate) / 10000;
-            let net_amount = amount - fee_amount;
-            (net_amount * vault.total_shares) / vault.total_usdt
+            let total_value = vault.total_usdt + vault.total_apt;
+            if (total_value == 0) {
+                return
+            };
+            (amount * vault.total_shares) / total_value
         };
 
-        // Update vault state
-        vault.total_usdt = vault.total_usdt + amount;
-        vault.total_shares = vault.total_shares + shares_to_mint;
+        if (shares_to_mint == 0) {
+            return
+        };
 
-        // Update or create user shares
-        if (exists<UserShares>(user_addr)) {
-            let user_shares = borrow_global_mut<UserShares>(user_addr);
-            user_shares.shares = user_shares.shares + shares_to_mint;
-            user_shares.last_deposit = timestamp::now_seconds();
-            user_shares.total_deposited = user_shares.total_deposited + amount;
-        } else {
+        // Update vault state with checked arithmetic
+        vault.total_shares = vault.total_shares + shares_to_mint;
+        vault.total_usdt = vault.total_usdt + amount;
+
+        // Mint shares for user
+        if (!exists<UserShares>(user_addr)) {
             move_to(user, UserShares {
                 shares: shares_to_mint,
                 last_deposit: timestamp::now_seconds(),
@@ -155,6 +151,11 @@ module vault::vault {
                 total_deposited: amount,
                 total_withdrawn: 0,
             });
+        } else {
+            let user_shares = borrow_global_mut<UserShares>(user_addr);
+            user_shares.shares = user_shares.shares + shares_to_mint;
+            user_shares.last_deposit = timestamp::now_seconds();
+            user_shares.total_deposited = user_shares.total_deposited + amount;
         };
 
         // Emit deposit event
@@ -166,19 +167,34 @@ module vault::vault {
             vault_total_shares: vault.total_shares,
             vault_total_usdt: vault.total_usdt,
         };
+
+        // In a real implementation, you would emit this event
+        // event::emit(deposit_event_handle, deposit_event);
     }
 
-    // Withdraw USDT from vault (ERC4626 equivalent)
+    // Withdraw USDT from vault (ERC4626 withdraw)
     public entry fun withdraw(
         user: &signer,
         shares_to_burn: u64,
     ) acquires VaultResource, UserShares {
+        let user_addr = signer::address_of(user);
+        
         if (shares_to_burn == 0) {
             return
         };
 
-        let user_addr = signer::address_of(user);
+        // Check if vault exists
+        if (!exists<VaultResource>(@vault)) {
+            return
+        };
+
+        let vault = borrow_global_mut<VaultResource>(@vault);
         
+        if (!vault.is_active) {
+            return
+        };
+
+        // Check if user has enough shares
         if (!exists<UserShares>(user_addr)) {
             return
         };
@@ -189,55 +205,70 @@ module vault::vault {
             return
         };
 
-        let vault = borrow_global_mut<VaultResource>(@vault);
-        
-        if (!vault.is_active) {
+        // Calculate amount to withdraw with proper arithmetic
+        let total_value = vault.total_usdt + vault.total_apt;
+        let amount_to_withdraw = if (vault.total_shares == 0) {
+            return
+        } else {
+            (shares_to_burn * total_value) / vault.total_shares
+        };
+
+        if (amount_to_withdraw == 0) {
             return
         };
 
-        // Calculate USDT to withdraw (ERC4626 formula)
-        let usdt_to_withdraw = (shares_to_burn * vault.total_usdt) / vault.total_shares;
-        
-        if (usdt_to_withdraw > vault.total_usdt) {
+        // Check if vault has enough balance
+        if (vault.total_usdt < amount_to_withdraw) {
             return
         };
 
-        // Update vault state
+        // Update vault state with checked arithmetic
         vault.total_shares = vault.total_shares - shares_to_burn;
-        vault.total_usdt = vault.total_usdt - usdt_to_withdraw;
+        vault.total_usdt = vault.total_usdt - amount_to_withdraw;
 
-        // Update user shares
+        // Burn user shares
         user_shares.shares = user_shares.shares - shares_to_burn;
         user_shares.last_withdraw = timestamp::now_seconds();
-        user_shares.total_withdrawn = user_shares.total_withdrawn + usdt_to_withdraw;
+        user_shares.total_withdrawn = user_shares.total_withdrawn + amount_to_withdraw;
 
         // Emit withdraw event
         let withdraw_event = WithdrawEvent {
             user: user_addr,
-            amount: usdt_to_withdraw,
+            amount: amount_to_withdraw,
             shares_burned: shares_to_burn,
             timestamp: timestamp::now_seconds(),
             vault_total_shares: vault.total_shares,
             vault_total_usdt: vault.total_usdt,
         };
+
+        // In a real implementation, you would emit this event
+        // event::emit(withdraw_event_handle, withdraw_event);
     }
 
-    // Redeem shares for USDT (ERC4626 equivalent)
+    // Redeem shares for USDT (ERC4626 redeem)
     public entry fun redeem(
         user: &signer,
         shares_to_burn: u64,
     ) acquires VaultResource, UserShares {
-        withdraw(user, shares_to_burn)
+        // Redeem is the same as withdraw in this implementation
+        withdraw(user, shares_to_burn);
     }
 
-    // Rebalance vault (swap USDT for APT)
+    // Rebalance vault assets (owner only)
     public entry fun rebalance(
         owner: &signer,
         usdt_amount: u64,
     ) acquires VaultResource {
         let owner_addr = signer::address_of(owner);
+        
+        // Check if vault exists
+        if (!exists<VaultResource>(@vault)) {
+            return
+        };
+
         let vault = borrow_global_mut<VaultResource>(@vault);
         
+        // Check access control
         if (vault.owner != owner_addr) {
             return
         };
@@ -246,7 +277,12 @@ module vault::vault {
             return
         };
 
-        if (usdt_amount == 0 || usdt_amount > vault.total_usdt) {
+        if (usdt_amount == 0) {
+            return
+        };
+
+        // Check if vault has enough USDT
+        if (vault.total_usdt < usdt_amount) {
             return
         };
 
@@ -259,80 +295,88 @@ module vault::vault {
         };
 
         // Only rebalance if deviation is significant (>10%)
-        if (current_usdt_ratio > target_usdt_ratio + 1000 || current_usdt_ratio < target_usdt_ratio - 1000) {
+        let threshold = 1000; // 10% deviation
+        if (current_usdt_ratio > target_usdt_ratio + threshold || 
+            current_usdt_ratio < target_usdt_ratio - threshold) {
+            
             // Calculate APT amount (simplified 1:1 ratio for demo)
             let apt_amount = usdt_amount;
             
-            // Update vault balances
+            // Update vault state with checked arithmetic
             vault.total_usdt = vault.total_usdt - usdt_amount;
             vault.total_apt = vault.total_apt + apt_amount;
             vault.last_rebalance = timestamp::now_seconds();
 
             // Emit rebalance event
             let rebalance_event = RebalanceEvent {
-                usdt_amount: usdt_amount,
-                apt_amount: apt_amount,
+                usdt_amount: vault.total_usdt,
+                apt_amount: vault.total_apt,
                 timestamp: timestamp::now_seconds(),
                 target_ratio: target_usdt_ratio,
                 current_ratio: current_usdt_ratio,
             };
+
+            // In a real implementation, you would emit this event
+            // event::emit(rebalance_event_handle, rebalance_event);
         };
     }
 
-    // Convert USDT to shares (ERC4626 equivalent)
+    // Convert USDT to shares (ERC4626 convertToShares)
     #[view]
     public fun convert_to_shares(assets: u64): u64 acquires VaultResource {
         if (!exists<VaultResource>(@vault)) {
             return 0
         };
-        
+
         let vault = borrow_global<VaultResource>(@vault);
         
-        if (vault.total_shares == 0 || vault.total_usdt == 0) {
-            return assets
+        if (vault.total_shares == 0) {
+            return assets // First deposit: 1:1 ratio
         };
-        
-        // Apply fee
-        let fee_amount = (assets * vault.fee_rate) / 10000;
-        let net_assets = assets - fee_amount;
-        
-        (net_assets * vault.total_shares) / vault.total_usdt
+
+        let total_value = vault.total_usdt + vault.total_apt;
+        if (total_value == 0) {
+            return 0
+        };
+
+        (assets * vault.total_shares) / total_value
     }
 
-    // Convert shares to USDT (ERC4626 equivalent)
+    // Convert shares to USDT (ERC4626 convertToAssets)
     #[view]
     public fun convert_to_assets(shares: u64): u64 acquires VaultResource {
         if (!exists<VaultResource>(@vault)) {
             return 0
         };
-        
+
         let vault = borrow_global<VaultResource>(@vault);
         
         if (vault.total_shares == 0) {
             return 0
         };
-        
-        (shares * vault.total_usdt) / vault.total_shares
+
+        let total_value = vault.total_usdt + vault.total_apt;
+        (shares * total_value) / vault.total_shares
     }
 
-    // Get total assets (ERC4626 equivalent)
+    // Get total assets (ERC4626 totalAssets)
     #[view]
     public fun total_assets(): u64 acquires VaultResource {
         if (!exists<VaultResource>(@vault)) {
             return 0
         };
-        
+
         let vault = borrow_global<VaultResource>(@vault);
         vault.total_usdt + vault.total_apt
     }
 
-    // Get total shares (ERC4626 equivalent)
+    // Get total shares (ERC4626 totalSupply)
     #[view]
     public fun total_shares(): u64 acquires VaultResource {
         if (!exists<VaultResource>(@vault)) {
             return 0
         };
-        
+
         let vault = borrow_global<VaultResource>(@vault);
         vault.total_shares
     }
@@ -370,6 +414,10 @@ module vault::vault {
     // Get vault owner
     #[view]
     public fun get_vault_owner(): address acquires VaultResource {
+        if (!exists<VaultResource>(@vault)) {
+            return @0x0
+        };
+
         let vault = borrow_global<VaultResource>(@vault);
         vault.owner
     }
@@ -377,6 +425,11 @@ module vault::vault {
     // Set vault fee rate (owner only)
     public entry fun set_fee_rate(owner: &signer, new_fee_rate: u64) acquires VaultResource {
         let owner_addr = signer::address_of(owner);
+        
+        if (!exists<VaultResource>(@vault)) {
+            return
+        };
+
         let vault = borrow_global_mut<VaultResource>(@vault);
         
         if (vault.owner != owner_addr) {
@@ -393,6 +446,11 @@ module vault::vault {
     // Set vault active status (owner only)
     public entry fun set_vault_active(owner: &signer, is_active: bool) acquires VaultResource {
         let owner_addr = signer::address_of(owner);
+        
+        if (!exists<VaultResource>(@vault)) {
+            return
+        };
+
         let vault = borrow_global_mut<VaultResource>(@vault);
         
         if (vault.owner != owner_addr) {

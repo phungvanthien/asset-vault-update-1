@@ -1,369 +1,335 @@
 #[test_only]
 module vault::vault_tests {
+    use std::signer;
     use std::vector;
     use aptos_framework::timestamp;
+    use aptos_framework::coin::{Self, Coin};
     use aptos_framework::account;
 
-    // Import modules to test
+    // Import vault modules
     use vault::vault;
     use vault::pancakeswap_adapter;
     use vault::vault_core_simple;
     use vault::vault_integration;
 
     // Test addresses
-    const TEST_VAULT_ADDRESS: address = @0x2fdd1d8c08c6d2e447cffd67419cd9f0d53bedd003e5a6ee427b649f0c1077ef;
     const TEST_USER_ADDRESS: address = @0x1234567890123456789012345678901234567890123456789012345678901234;
-    const TEST_MANAGER_ADDRESS: address = @0x2345678901234567890123456789012345678901234567890123456789012345;
+    const TEST_MANAGER_ADDRESS: address = @0xf9bf1298a04a1fe13ed75059e9e6950ec1ec2d6ed95f8a04a6e11af23c87381e;
 
-    // Test constants
+    // Test amounts
     const TEST_DEPOSIT_AMOUNT: u64 = 1000000; // 1 USDT
     const TEST_WITHDRAW_AMOUNT: u64 = 500000; // 0.5 USDT
-    const TEST_SWAP_AMOUNT: u64 = 100000; // 0.1 USDT
+    const TEST_SWAP_AMOUNT: u64 = 100000; // 0.1 APT
 
+    // Test vault initialization
     #[test]
     fun test_vault_initialization() {
-        let owner = account::create_account_for_test(@vault);
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
         
-        // Test vault initialization
-        vault::initialize_vault(&owner);
+        // Initialize vault
+        vault::initialize_vault(&test_user);
         
-        // Verify vault status
+        // Check vault status
         let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
-        assert!(total_shares == vault::get_initial_shares(), 1);
+        
+        assert!(total_shares == 0, 1);
         assert!(total_usdt == 0, 2);
         assert!(total_apt == 0, 3);
         assert!(is_active == true, 4);
-        assert!(fee_rate == 100, 5);
+        assert!(fee_rate == 100, 5); // 1% fee
+        
+        // Check vault owner
+        let owner = vault::get_vault_owner();
+        assert!(owner == TEST_USER_ADDRESS, 6);
     }
 
+    // Test deposit functionality
     #[test]
-    fun test_deposit_function() {
-        let owner = account::create_account_for_test(@vault);
-        let user = account::create_account_for_test(TEST_USER_ADDRESS);
+    fun test_deposit() {
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
         
         // Initialize vault
-        vault::initialize_vault(&owner);
+        vault::initialize_vault(&test_user);
         
-        // Test deposit
-        vault::deposit(&user, TEST_DEPOSIT_AMOUNT);
+        // Deposit USDT
+        vault::deposit(&test_user, TEST_DEPOSIT_AMOUNT);
         
-        // Verify user balance
-        let (shares, usdt_balance, total_deposited, total_withdrawn) = vault::get_user_balance(TEST_USER_ADDRESS);
-        assert!(shares > 0, 6);
-        assert!(total_deposited == TEST_DEPOSIT_AMOUNT, 7);
-        assert!(total_withdrawn == 0, 8);
+        // Check vault status after deposit
+        let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
+        
+        assert!(total_shares == TEST_DEPOSIT_AMOUNT, 7); // First deposit: 1:1 ratio
+        assert!(total_usdt == TEST_DEPOSIT_AMOUNT, 8);
+        assert!(total_apt == 0, 9);
+        
+        // Check user balance
+        let (user_shares, user_usdt, total_deposited, total_withdrawn) = vault::get_user_balance(TEST_USER_ADDRESS);
+        
+        assert!(user_shares == TEST_DEPOSIT_AMOUNT, 10);
+        assert!(user_usdt == TEST_DEPOSIT_AMOUNT, 11);
+        assert!(total_deposited == TEST_DEPOSIT_AMOUNT, 12);
+        assert!(total_withdrawn == 0, 13);
     }
 
+    // Test withdraw functionality
     #[test]
-    fun test_withdraw_function() {
-        let owner = account::create_account_for_test(@vault);
-        let user = account::create_account_for_test(TEST_USER_ADDRESS);
+    fun test_withdraw() {
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
         
         // Initialize vault
-        vault::initialize_vault(&owner);
+        vault::initialize_vault(&test_user);
         
-        // Deposit first
-        vault::deposit(&user, TEST_DEPOSIT_AMOUNT);
+        // Deposit USDT
+        vault::deposit(&test_user, TEST_DEPOSIT_AMOUNT);
         
-        // Test withdraw
-        vault::withdraw(&user, TEST_WITHDRAW_AMOUNT);
+        // Withdraw shares
+        vault::withdraw(&test_user, TEST_WITHDRAW_AMOUNT);
         
-        // Verify user balance
-        let (shares, usdt_balance, total_deposited, total_withdrawn) = vault::get_user_balance(TEST_USER_ADDRESS);
-        assert!(shares > 0, 9);
-        assert!(total_withdrawn > 0, 10);
+        // Check vault status after withdrawal
+        let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
+        
+        assert!(total_shares == TEST_DEPOSIT_AMOUNT - TEST_WITHDRAW_AMOUNT, 14);
+        assert!(total_usdt == TEST_DEPOSIT_AMOUNT - TEST_WITHDRAW_AMOUNT, 15);
+        
+        // Check user balance
+        let (user_shares, user_usdt, total_deposited, total_withdrawn) = vault::get_user_balance(TEST_USER_ADDRESS);
+        
+        assert!(user_shares == TEST_DEPOSIT_AMOUNT - TEST_WITHDRAW_AMOUNT, 16);
+        assert!(user_usdt == TEST_DEPOSIT_AMOUNT - TEST_WITHDRAW_AMOUNT, 17);
+        assert!(total_withdrawn == TEST_WITHDRAW_AMOUNT, 18);
     }
 
+    // Test rebalance functionality
     #[test]
-    fun test_redeem_function() {
-        let owner = account::create_account_for_test(@vault);
-        let user = account::create_account_for_test(TEST_USER_ADDRESS);
+    fun test_rebalance() {
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
         
         // Initialize vault
-        vault::initialize_vault(&owner);
+        vault::initialize_vault(&test_user);
         
-        // Deposit first
-        vault::deposit(&user, TEST_DEPOSIT_AMOUNT);
+        // Deposit USDT
+        vault::deposit(&test_user, TEST_DEPOSIT_AMOUNT);
         
-        // Test redeem (should be same as withdraw)
-        vault::redeem(&user, TEST_WITHDRAW_AMOUNT);
+        // Rebalance (swap USDT for APT)
+        vault::rebalance(&test_user, TEST_WITHDRAW_AMOUNT);
         
-        // Verify user balance
-        let (shares, usdt_balance, total_deposited, total_withdrawn) = vault::get_user_balance(TEST_USER_ADDRESS);
-        assert!(shares > 0, 11);
-        assert!(total_withdrawn > 0, 12);
+        // Check vault status after rebalance
+        let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
+        
+        assert!(total_shares == TEST_DEPOSIT_AMOUNT, 19);
+        assert!(total_usdt == TEST_DEPOSIT_AMOUNT - TEST_WITHDRAW_AMOUNT, 20);
+        assert!(total_apt == TEST_WITHDRAW_AMOUNT, 21); // 1:1 ratio for demo
     }
 
+    // Test convert functions
     #[test]
     fun test_convert_functions() {
-        let owner = account::create_account_for_test(@vault);
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
         
         // Initialize vault
-        vault::initialize_vault(&owner);
+        vault::initialize_vault(&test_user);
+        
+        // Deposit USDT
+        vault::deposit(&test_user, TEST_DEPOSIT_AMOUNT);
         
         // Test convert_to_shares
-        let shares = vault::convert_to_shares(TEST_DEPOSIT_AMOUNT);
-        assert!(shares > 0, 13);
+        let shares = vault::convert_to_shares(TEST_WITHDRAW_AMOUNT);
+        assert!(shares == TEST_WITHDRAW_AMOUNT, 22); // 1:1 ratio for first deposit
         
         // Test convert_to_assets
-        let assets = vault::convert_to_assets(shares);
-        assert!(assets > 0, 14);
+        let assets = vault::convert_to_assets(TEST_WITHDRAW_AMOUNT);
+        assert!(assets == TEST_WITHDRAW_AMOUNT, 23); // 1:1 ratio for first deposit
     }
 
+    // Test total assets and shares
     #[test]
     fun test_total_assets_and_shares() {
-        let owner = account::create_account_for_test(@vault);
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
         
         // Initialize vault
-        vault::initialize_vault(&owner);
+        vault::initialize_vault(&test_user);
         
-        // Test total_assets
-        let total_assets = vault::total_assets();
-        assert!(total_assets >= 0, 15);
+        // Check initial state
+        assert!(vault::total_assets() == 0, 24);
+        assert!(vault::total_shares() == 0, 25);
         
-        // Test total_shares
-        let total_shares = vault::total_shares();
-        assert!(total_shares == vault::get_initial_shares(), 16);
+        // Deposit USDT
+        vault::deposit(&test_user, TEST_DEPOSIT_AMOUNT);
+        
+        // Check after deposit
+        assert!(vault::total_assets() == TEST_DEPOSIT_AMOUNT, 26);
+        assert!(vault::total_shares() == TEST_DEPOSIT_AMOUNT, 27);
     }
 
-    #[test]
-    fun test_rebalance_function() {
-        let owner = account::create_account_for_test(@vault);
-        
-        // Initialize vault
-        vault::initialize_vault(&owner);
-        
-        // Test rebalance
-        vault::rebalance(&owner, TEST_SWAP_AMOUNT);
-        
-        // Verify vault status
-        let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
-        assert!(total_apt > 0, 17);
-    }
-
-    #[test]
-    fun test_pancakeswap_adapter() {
-        let user = account::create_account_for_test(TEST_USER_ADDRESS);
-        
-        // Test router creation
-        pancakeswap_adapter::create_router(&user);
-        
-        // Test get_quote
-        let quote = pancakeswap_adapter::get_quote(
-            vault::get_usdt_address(),
-            vault::get_apt_address(),
-            TEST_SWAP_AMOUNT
-        );
-        assert!(quote > 0, 18);
-        
-        // Test get_amounts_out
-        let path = vector::empty<address>();
-        vector::push_back(&mut path, vault::get_usdt_address());
-        vector::push_back(&mut path, vault::get_apt_address());
-        
-        let amounts = pancakeswap_adapter::get_amounts_out(TEST_SWAP_AMOUNT, path);
-        assert!(vector::length(&amounts) == 2, 19);
-    }
-
+    // Test vault core simple functions
     #[test]
     fun test_vault_core_simple() {
-        let manager = account::create_account_for_test(TEST_MANAGER_ADDRESS);
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
         
-        // Test vault creation
-        vault_core_simple::create_vault(&manager);
+        // Create vault
+        vault_core_simple::create_vault(&test_user);
         
-        // Test mint shares
-        vault_core_simple::mint_shares(&manager, TEST_DEPOSIT_AMOUNT);
+        // Mint shares
+        vault_core_simple::mint_shares(&test_user, TEST_DEPOSIT_AMOUNT);
         
-        // Test get vault info
-        let (total_shares, usdt_balance, apt_balance, is_active, fee_rate) = vault_core_simple::get_vault_info(TEST_MANAGER_ADDRESS);
-        assert!(total_shares > 0, 20);
-        assert!(usdt_balance > 0, 21);
-        assert!(is_active == true, 22);
+        // Check user shares
+        let user_shares = vault_core_simple::get_user_shares(TEST_USER_ADDRESS);
+        assert!(user_shares == TEST_DEPOSIT_AMOUNT, 28);
         
-        // Test get balance
-        let balance = vault_core_simple::get_balance(TEST_MANAGER_ADDRESS);
-        assert!(balance > 0, 23);
+        // Burn shares
+        vault_core_simple::burn_shares(&test_user, TEST_WITHDRAW_AMOUNT);
+        
+        // Check user shares after burn
+        let user_shares_after = vault_core_simple::get_user_shares(TEST_USER_ADDRESS);
+        assert!(user_shares_after == TEST_DEPOSIT_AMOUNT - TEST_WITHDRAW_AMOUNT, 29);
     }
 
+    // Test pancakeswap adapter functions
     #[test]
-    fun test_vault_integration() {
-        let manager = account::create_account_for_test(TEST_MANAGER_ADDRESS);
+    fun test_pancakeswap_adapter() {
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
         
-        // Initialize integration
-        vault_integration::initialize_integration(&manager, TEST_VAULT_ADDRESS);
+        // Initialize router
+        pancakeswap_adapter::initialize_router(&test_user);
         
-        // Test get integration status
-        let (vault_addr, router_addr, is_active, last_rebalance, total_swaps, total_volume) = vault_integration::get_integration_status(TEST_MANAGER_ADDRESS);
-        assert!(vault_addr == TEST_VAULT_ADDRESS, 24);
-        assert!(is_active == true, 25);
-        assert!(total_swaps == 0, 26);
-        assert!(total_volume == 0, 27);
+        // Get router address
+        let router_address = pancakeswap_adapter::get_pancakeswap_router();
+        assert!(router_address == @0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299405d018d7e18f75ac2b0e95f60, 30);
         
-        // Test get rebalancing amount
-        let (amount, direction) = vault_integration::get_rebalancing_amount();
-        assert!(amount >= 0, 28);
-        assert!(direction >= 0, 29);
-        
-        // Test get vault performance
-        let (total_value, usdt_ratio, total_shares, fee_rate) = vault_integration::get_vault_performance();
-        assert!(total_value >= 0, 30);
-        assert!(usdt_ratio >= 0, 31);
-        assert!(total_shares >= 0, 32);
-        assert!(fee_rate >= 0, 33);
-    }
-
-    #[test]
-    fun test_swap_functions() {
-        let user = account::create_account_for_test(TEST_USER_ADDRESS);
-        
-        // Test swap USDT for APT
-        pancakeswap_adapter::swap_usdt_for_apt(&user, TEST_SWAP_AMOUNT);
-        
-        // Test swap APT for USDT
-        pancakeswap_adapter::swap_apt_for_usdt(&user, TEST_SWAP_AMOUNT);
-        
-        // Test vault swap
-        let path = vector::empty<address>();
-        vector::push_back(&mut path, vault::get_usdt_address());
-        vector::push_back(&mut path, vault::get_apt_address());
-        
-        pancakeswap_adapter::vault_swap(&user, TEST_SWAP_AMOUNT, 0, path, timestamp::now_seconds() + 3600);
-    }
-
-    #[test]
-    fun test_fee_management() {
-        let owner = account::create_account_for_test(@vault);
-        
-        // Initialize vault
-        vault::initialize_vault(&owner);
-        
-        // Test set fee rate
-        vault::set_fee_rate(&owner, 200); // 2%
-        
-        // Verify fee rate
-        let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
-        assert!(fee_rate == 200, 34);
-    }
-
-    #[test]
-    fun test_vault_active_status() {
-        let owner = account::create_account_for_test(@vault);
-        
-        // Initialize vault
-        vault::initialize_vault(&owner);
-        
-        // Test set vault active
-        vault::set_vault_active(&owner, false);
-        
-        // Verify active status
-        let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
-        assert!(is_active == false, 35);
-    }
-
-    #[test]
-    fun test_router_management() {
-        let user = account::create_account_for_test(TEST_USER_ADDRESS);
-        
-        // Create router
-        pancakeswap_adapter::create_router(&user);
-        
-        // Test set router active
-        pancakeswap_adapter::set_router_active(&user, false);
-        
-        // Test get router info
-        let (router_addr, is_active) = pancakeswap_adapter::get_router_info();
-        assert!(router_addr == pancakeswap_adapter::get_pancakeswap_router(), 36);
-    }
-
-    #[test]
-    fun test_integration_management() {
-        let manager = account::create_account_for_test(TEST_MANAGER_ADDRESS);
-        
-        // Initialize integration
-        vault_integration::initialize_integration(&manager, TEST_VAULT_ADDRESS);
-        
-        // Test set integration active
-        vault_integration::set_integration_active(&manager, false);
-        
-        // Verify integration status
-        let (vault_addr, router_addr, is_active, last_rebalance, total_swaps, total_volume) = vault_integration::get_integration_status(TEST_MANAGER_ADDRESS);
-        assert!(is_active == false, 37);
-    }
-
-    #[test]
-    fun test_manual_rebalancing() {
-        let manager = account::create_account_for_test(TEST_MANAGER_ADDRESS);
-        
-        // Initialize integration
-        vault_integration::initialize_integration(&manager, TEST_VAULT_ADDRESS);
-        
-        // Test manual rebalance USDT->APT
-        vault_integration::manual_rebalance(&manager, TEST_SWAP_AMOUNT, 0);
-        
-        // Test manual rebalance APT->USDT
-        vault_integration::manual_rebalance(&manager, TEST_SWAP_AMOUNT, 1);
-        
-        // Verify integration status
-        let (vault_addr, router_addr, is_active, last_rebalance, total_swaps, total_volume) = vault_integration::get_integration_status(TEST_MANAGER_ADDRESS);
-        assert!(total_swaps > 0, 38);
-        assert!(total_volume > 0, 39);
-    }
-
-    #[test]
-    fun test_quote_functions() {
-        // Test get swap quote
-        let quote = vault_integration::get_swap_quote(
-            vault::get_usdt_address(),
+        // Get quote
+        let quote = pancakeswap_adapter::get_quote(
             vault::get_apt_address(),
+            vault::get_usdt_address(),
             TEST_SWAP_AMOUNT
         );
-        assert!(quote > 0, 40);
+        assert!(quote == TEST_SWAP_AMOUNT, 31); // 1:1 ratio for demo
         
-        // Test get quote with path
-        let path = vector::empty<address>();
-        vector::push_back(&mut path, vault::get_usdt_address());
-        vector::push_back(&mut path, vault::get_apt_address());
-        
-        let quote_with_path = pancakeswap_adapter::get_quote_with_path(TEST_SWAP_AMOUNT, path);
-        assert!(quote_with_path > 0, 41);
+        // Get router stats
+        let (router_addr, is_active, total_swaps, total_volume, last_swap) = pancakeswap_adapter::get_router_stats(TEST_USER_ADDRESS);
+        assert!(is_active == true, 32);
+        assert!(total_swaps == 0, 33);
+        assert!(total_volume == 0, 34);
     }
 
+    // Test vault integration functions
     #[test]
-    fun test_asset_pool_management() {
-        let manager = account::create_account_for_test(TEST_MANAGER_ADDRESS);
+    fun test_vault_integration() {
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
         
-        // Create vault
-        vault_core_simple::create_vault(&manager);
+        // Initialize integration
+        vault_integration::initialize_integration(&test_user, vault::get_vault_address());
         
-        // Test get asset pool info
-        let (usdt_balance, apt_balance, total_value, last_update) = vault_core_simple::get_asset_pool_info(TEST_MANAGER_ADDRESS);
-        assert!(usdt_balance >= 0, 42);
-        assert!(apt_balance >= 0, 43);
-        assert!(total_value >= 0, 44);
-        assert!(last_update > 0, 45);
+        // Get integration status
+        let (vault_addr, router_addr, is_active, last_rebalance, total_swaps, total_volume) = vault_integration::get_integration_status(TEST_USER_ADDRESS);
+        assert!(is_active == true, 35);
+        assert!(total_swaps == 0, 36);
+        assert!(total_volume == 0, 37);
+        
+        // Get rebalancing amount
+        let (amount, direction) = vault_integration::get_rebalancing_amount();
+        // This will depend on vault state, so we just test it doesn't panic
+        assert!(true, 38);
+        
+        // Get vault performance
+        let (total_value, usdt_ratio, total_shares, fee_rate) = vault_integration::get_vault_performance();
+        // This will depend on vault state, so we just test it doesn't panic
+        assert!(true, 39);
     }
 
+    // Test access control
     #[test]
-    fun test_vault_manager_functions() {
-        let manager = account::create_account_for_test(TEST_MANAGER_ADDRESS);
+    fun test_access_control() {
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
+        let unauthorized_user = account::create_account_for_test(@0x9999999999999999999999999999999999999999999999999999999999999999);
         
-        // Create vault
-        vault_core_simple::create_vault(&manager);
+        // Initialize vault
+        vault::initialize_vault(&test_user);
         
-        // Test get vault manager
-        let manager_addr = vault_core_simple::get_vault_manager(TEST_MANAGER_ADDRESS);
-        assert!(manager_addr == TEST_MANAGER_ADDRESS, 46);
+        // Try to set fee rate with unauthorized user (should fail silently)
+        vault::set_fee_rate(&unauthorized_user, 200);
         
-        // Test set fee rate
-        vault_core_simple::set_fee_rate(&manager, 150); // 1.5%
+        // Check fee rate is still original
+        let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
+        assert!(fee_rate == 100, 40); // Should still be 1%
         
-        // Test set vault active
-        vault_core_simple::set_vault_active(&manager, false);
+        // Set fee rate with authorized user
+        vault::set_fee_rate(&test_user, 200);
         
-        // Verify changes
-        let (total_shares, usdt_balance, apt_balance, is_active, fee_rate) = vault_core_simple::get_vault_info(TEST_MANAGER_ADDRESS);
-        assert!(fee_rate == 150, 47);
-        assert!(is_active == false, 48);
+        // Check fee rate changed
+        let (total_shares2, total_usdt2, total_apt2, created_at2, is_active2, fee_rate2) = vault::get_vault_status();
+        assert!(fee_rate2 == 200, 41);
+    }
+
+    // Test edge cases
+    #[test]
+    fun test_edge_cases() {
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
+        
+        // Initialize vault
+        vault::initialize_vault(&test_user);
+        
+        // Try to deposit 0 amount (should fail silently)
+        vault::deposit(&test_user, 0);
+        
+        // Check no change
+        let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
+        assert!(total_shares == 0, 42);
+        assert!(total_usdt == 0, 43);
+        
+        // Try to withdraw more than available (should fail silently)
+        vault::deposit(&test_user, TEST_DEPOSIT_AMOUNT);
+        vault::withdraw(&test_user, TEST_DEPOSIT_AMOUNT + 1);
+        
+        // Check shares not changed
+        let (user_shares, user_usdt, total_deposited, total_withdrawn) = vault::get_user_balance(TEST_USER_ADDRESS);
+        assert!(user_shares == TEST_DEPOSIT_AMOUNT, 44);
+    }
+
+    // Test vault deactivation
+    #[test]
+    fun test_vault_deactivation() {
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
+        
+        // Initialize vault
+        vault::initialize_vault(&test_user);
+        
+        // Deactivate vault
+        vault::set_vault_active(&test_user, false);
+        
+        // Check vault is inactive
+        let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
+        assert!(is_active == false, 45);
+        
+        // Try to deposit when inactive (should fail silently)
+        vault::deposit(&test_user, TEST_DEPOSIT_AMOUNT);
+        
+        // Check no change
+        let (total_shares2, total_usdt2, total_apt2, created_at2, is_active2, fee_rate2) = vault::get_vault_status();
+        assert!(total_shares2 == 0, 46);
+        assert!(total_usdt2 == 0, 47);
+    }
+
+    // Test multiple deposits
+    #[test]
+    fun test_multiple_deposits() {
+        let test_user = account::create_account_for_test(TEST_USER_ADDRESS);
+        
+        // Initialize vault
+        vault::initialize_vault(&test_user);
+        
+        // First deposit
+        vault::deposit(&test_user, TEST_DEPOSIT_AMOUNT);
+        
+        // Second deposit
+        vault::deposit(&test_user, TEST_DEPOSIT_AMOUNT);
+        
+        // Check total shares and USDT
+        let (total_shares, total_usdt, total_apt, created_at, is_active, fee_rate) = vault::get_vault_status();
+        assert!(total_shares == TEST_DEPOSIT_AMOUNT * 2, 48);
+        assert!(total_usdt == TEST_DEPOSIT_AMOUNT * 2, 49);
+        
+        // Check user balance
+        let (user_shares, user_usdt, total_deposited, total_withdrawn) = vault::get_user_balance(TEST_USER_ADDRESS);
+        assert!(user_shares == TEST_DEPOSIT_AMOUNT * 2, 50);
+        assert!(total_deposited == TEST_DEPOSIT_AMOUNT * 2, 51);
     }
 } 
