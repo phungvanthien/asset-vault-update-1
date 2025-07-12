@@ -1,0 +1,10 @@
+# Build directories
+build/
+target/
+*.mv
+*.mvsm
+*.yaml
+.aptos/
+aptos.yaml
+*.key
+*.pem

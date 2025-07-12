@@ -180,14 +180,14 @@ module vault::vault_core_simple {
         if (shares_to_mint == 0) {
             return
         };
-
+        
         // Update vault state
         vault.total_shares = vault.total_shares + shares_to_mint;
         asset_pool.usdt_balance = asset_pool.usdt_balance + amount;
         asset_pool.total_value = asset_pool.usdt_balance + asset_pool.apt_balance;
         asset_pool.total_deposits = asset_pool.total_deposits + amount;
         asset_pool.last_update = timestamp::now_seconds();
-
+        
         // Mint shares for user
         if (!exists<VaultShares>(user_addr)) {
             move_to(user, VaultShares {
@@ -275,8 +275,8 @@ module vault::vault_core_simple {
         asset_pool.usdt_balance = asset_pool.usdt_balance - amount_to_withdraw;
         asset_pool.total_value = asset_pool.usdt_balance + asset_pool.apt_balance;
         asset_pool.total_withdrawals = asset_pool.total_withdrawals + amount_to_withdraw;
-        asset_pool.last_update = timestamp::now_seconds();
-
+            asset_pool.last_update = timestamp::now_seconds();
+            
         // Burn user shares
         user_shares.shares = user_shares.shares - shares_to_burn;
         user_shares.last_withdraw = timestamp::now_seconds();
@@ -305,7 +305,7 @@ module vault::vault_core_simple {
         if (!exists<VaultStorage>(vault_addr)) {
             return 0
         };
-
+        
         let vault = borrow_global<VaultStorage>(vault_addr);
         let asset_pool = borrow_global<AssetPool>(vault_addr);
         
@@ -317,7 +317,7 @@ module vault::vault_core_simple {
         if (total_value == 0) {
             return 0
         };
-
+        
         (assets * vault.total_shares) / total_value
     }
 
@@ -330,14 +330,14 @@ module vault::vault_core_simple {
         if (!exists<VaultStorage>(vault_addr)) {
             return 0
         };
-
+        
         let vault = borrow_global<VaultStorage>(vault_addr);
         let asset_pool = borrow_global<AssetPool>(vault_addr);
         
         if (vault.total_shares == 0) {
             return 0
         };
-
+        
         let total_value = asset_pool.usdt_balance + asset_pool.apt_balance;
         (shares * total_value) / vault.total_shares
     }
@@ -348,7 +348,7 @@ module vault::vault_core_simple {
         if (!exists<AssetPool>(vault_addr)) {
             return 0
         };
-
+        
         let asset_pool = borrow_global<AssetPool>(vault_addr);
         asset_pool.usdt_balance + asset_pool.apt_balance
     }
@@ -359,7 +359,7 @@ module vault::vault_core_simple {
         if (!exists<VaultStorage>(vault_addr)) {
             return 0
         };
-
+        
         let vault = borrow_global<VaultStorage>(vault_addr);
         vault.total_shares
     }
@@ -396,17 +396,17 @@ module vault::vault_core_simple {
         if (!exists<VaultStorage>(manager_addr)) {
             return
         };
-
+        
         let vault = borrow_global_mut<VaultStorage>(manager_addr);
         
         if (vault.vault_manager != manager_addr) {
             return
         };
-
+        
         if (new_fee_rate > 1000) { // Max 10%
             return
         };
-
+        
         vault.fee_rate = new_fee_rate;
     }
 
@@ -420,13 +420,13 @@ module vault::vault_core_simple {
         if (!exists<VaultStorage>(manager_addr)) {
             return
         };
-
+        
         let vault = borrow_global_mut<VaultStorage>(manager_addr);
         
         if (vault.vault_manager != manager_addr) {
             return
         };
-
+        
         vault.is_active = is_active;
     }
 
@@ -436,7 +436,7 @@ module vault::vault_core_simple {
         if (!exists<VaultShares>(user_addr)) {
             return 0
         };
-
+        
         let user_shares = borrow_global<VaultShares>(user_addr);
         user_shares.shares
     }
@@ -447,7 +447,7 @@ module vault::vault_core_simple {
         if (!exists<VaultShares>(user_addr)) {
             return (0, 0, 0, 0)
         };
-
+        
         let user_shares = borrow_global<VaultShares>(user_addr);
         (user_shares.shares, user_shares.total_deposited, user_shares.total_withdrawn, user_shares.last_deposit)
     }
