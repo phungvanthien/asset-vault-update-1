@@ -2,20 +2,28 @@ module vault::pancakeswap_adapter {
     use std::signer;
     use std::vector;
     use aptos_framework::timestamp;
-    use aptos_framework::coin::{Self, Coin};
+    use aptos_framework::coin;
     use aptos_framework::account;
     use aptos_framework::event::{Self, EventHandle};
-    use aptos_framework::entry;
+    use aptos_framework::aptos_coin::AptosCoin;
 
     // Import PancakeSwap interface
     use vault::pancakeswap_interface;
 
-    // PancakeSwap Router address on Mainnet
-    const PANCAKESWAP_ROUTER: address = @0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299405d018d7e18f75ac2b0e95f60;
+    // PancakeSwap Router address on Mainnet (corrected)
+    const PANCAKESWAP_ROUTER: address = @0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa;
     
-    // Token addresses
+    // Token addresses (corrected)
     const USDT_ADDRESS: address = @0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa;
     const APT_ADDRESS: address = @0x1;
+
+    // Token types (corrected)
+    const APT_COIN_TYPE: vector<u8> = b"0x1::aptos_coin::AptosCoin";
+    const USDT_COIN_TYPE: vector<u8> = b"0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDT";
+
+    // Decimals
+    const APT_DECIMALS: u64 = 8;
+    const USDT_DECIMALS: u64 = 6;
 
     // USDT coin type
     struct USDT has key {
@@ -83,9 +91,9 @@ module vault::pancakeswap_adapter {
             last_swap_timestamp: 0,
         });
 
-        // Initialize event store
+        // Initialize event store with proper GUID
         move_to(owner, EventStore {
-            swap_events: event::new_event_handle<SwapEvent>(owner),
+            swap_events: event::new_event_handle<SwapEvent>(account::create_guid(owner)),
         });
     }
 
@@ -152,7 +160,8 @@ module vault::pancakeswap_adapter {
 
         // Withdraw tokens from user for the swap
         let input_coins = if (input_token == APT_ADDRESS) {
-            coin::withdraw<coin::AptosCoin>(user, amount_in)
+            // For APT, use proper AptosCoin
+            coin::withdraw<AptosCoin>(user, amount_in)
         } else if (input_token == USDT_ADDRESS) {
             // For USDT, we need to handle the custom coin type
             if (!exists<USDT>(user_addr)) {
@@ -164,7 +173,7 @@ module vault::pancakeswap_adapter {
             };
             usdt_balance.value = usdt_balance.value - amount_in;
             // Create a dummy coin for USDT (in real implementation, this would be proper USDT coin)
-            coin::zero<coin::AptosCoin>()
+            coin::zero<AptosCoin>()
         } else {
             return 0
         };
@@ -195,7 +204,7 @@ module vault::pancakeswap_adapter {
         if (output_token == APT_ADDRESS) {
             // For APT, we need to create the output coins
             // In real implementation, this would come from the router
-            let output_coins = coin::zero<coin::AptosCoin>();
+            let output_coins = coin::zero<AptosCoin>();
             coin::deposit(user_addr, output_coins);
         } else if (output_token == USDT_ADDRESS) {
             // For USDT, update the user's USDT balance
@@ -253,7 +262,8 @@ module vault::pancakeswap_adapter {
 
         // Check user balance for input token (real balance checking)
         if (input_token == APT_ADDRESS) {
-            let apt_balance = coin::balance<coin::AptosCoin>(user_addr);
+            // For APT, use proper balance check
+            let apt_balance = coin::balance<AptosCoin>(user_addr);
             if (apt_balance < amount_in) {
                 return
             };
@@ -441,10 +451,10 @@ module vault::pancakeswap_adapter {
         usdt_balance.value
     }
 
-    // Get APT balance for user
+    // Get APT balance for user (real implementation)
     #[view]
     public fun get_apt_balance(user_addr: address): u64 {
-        coin::balance<coin::AptosCoin>(user_addr)
+        coin::balance<AptosCoin>(user_addr)
     }
 
     // Check if user has sufficient balance for swap
@@ -455,7 +465,8 @@ module vault::pancakeswap_adapter {
         amount: u64
     ): bool acquires USDT {
         if (token_address == APT_ADDRESS) {
-            coin::balance<coin::AptosCoin>(user_addr) >= amount
+            // Real APT balance check
+            coin::balance<AptosCoin>(user_addr) >= amount
         } else if (token_address == USDT_ADDRESS) {
             if (!exists<USDT>(user_addr)) {
                 false
@@ -468,15 +479,15 @@ module vault::pancakeswap_adapter {
         }
     }
 
-    // Get swap events for user
+    // Get swap events for user (simplified)
     #[view]
     public fun get_swap_events(user_addr: address): vector<SwapEvent> acquires EventStore {
         if (!exists<EventStore>(user_addr)) {
             return vector::empty<SwapEvent>()
         };
         
-        let event_store = borrow_global<EventStore>(user_addr);
-        event::get_events<SwapEvent>(&event_store.swap_events)
+        // Return empty vector for now - in real implementation this would return actual events
+        vector::empty<SwapEvent>()
     }
 
     // Transfer tokens (helper function for real token transfers)
@@ -489,7 +500,8 @@ module vault::pancakeswap_adapter {
         let from_addr = signer::address_of(from);
         
         if (token_address == APT_ADDRESS) {
-            let coins = coin::withdraw<coin::AptosCoin>(from, amount);
+            // Real APT transfer
+            let coins = coin::withdraw<AptosCoin>(from, amount);
             coin::deposit(to, coins);
             true
         } else if (token_address == USDT_ADDRESS) {
@@ -503,7 +515,9 @@ module vault::pancakeswap_adapter {
                     from_balance.value = from_balance.value - amount;
                     
                     if (!exists<USDT>(to)) {
-                        move_to(&account::create_signer_with_capability(&account::create_test_signer_cap(to)), USDT { value: amount });
+                        // Cannot create USDT balance for recipient without proper signer
+                        // In real implementation, this would require proper USDT module integration
+                        false
                     } else {
                         let to_balance = borrow_global_mut<USDT>(to);
                         to_balance.value = to_balance.value + amount;
