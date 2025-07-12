@@ -7,6 +7,9 @@ module vault::pancakeswap_adapter {
     use aptos_framework::event::{Self, EventHandle};
     use aptos_framework::entry;
 
+    // Import PancakeSwap interface
+    use vault::pancakeswap_interface;
+
     // PancakeSwap Router address on Mainnet
     const PANCAKESWAP_ROUTER: address = @0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299405d018d7e18f75ac2b0e95f60;
     
@@ -109,70 +112,6 @@ module vault::pancakeswap_adapter {
         PANCAKESWAP_ROUTER
     }
 
-    // Real PancakeSwap router call to get quote
-    fun call_pancakeswap_get_amounts_out(
-        amount_in: u64,
-        path: vector<address>
-    ): u64 {
-        // This would be a real call to PancakeSwap's getAmountsOut function
-        // In Move, we need to use entry::call_module to call external modules
-        
-        // For now, we'll simulate the call with realistic price calculation
-        // In production, this would be:
-        // let result = entry::call_module<RouterModule>(
-        //     PANCAKESWAP_ROUTER,
-        //     "getAmountsOut",
-        //     vector[amount_in, path]
-        // );
-        
-        if (vector::length(&path) < 2) {
-            return 0
-        };
-        
-        let input_token = *vector::borrow(&path, 0);
-        let output_token = *vector::borrow(&path, vector::length(&path) - 1);
-        
-        // Realistic price calculation based on current market rates
-        if (input_token == APT_ADDRESS && output_token == USDT_ADDRESS) {
-            // APT to USDT: Current rate ~8.5 USDT per APT
-            (amount_in * 85) / 10
-        } else if (input_token == USDT_ADDRESS && output_token == APT_ADDRESS) {
-            // USDT to APT: Inverse rate
-            (amount_in * 10) / 85
-        } else {
-            0
-        }
-    }
-
-    // Real PancakeSwap router call to execute swap
-    fun call_pancakeswap_swap_exact_tokens_for_tokens(
-        amount_in: u64,
-        amount_out_min: u64,
-        path: vector<address>,
-        to: address,
-        deadline: u64
-    ): u64 {
-        // This would be a real call to PancakeSwap's swapExactTokensForTokens function
-        // In production, this would be:
-        // let result = entry::call_module<RouterModule>(
-        //     PANCAKESWAP_ROUTER,
-        //     "swapExactTokensForTokens",
-        //     vector[amount_in, amount_out_min, path, to, deadline]
-        // );
-        
-        // For now, simulate the swap with realistic output
-        let expected_output = call_pancakeswap_get_amounts_out(amount_in, path);
-        
-        // Apply some slippage simulation
-        let actual_output = if (expected_output > amount_out_min) {
-            expected_output - (expected_output / 100) // 1% slippage
-        } else {
-            0
-        };
-        
-        actual_output
-    }
-
     // Get quote for swap from PancakeSwap router (real implementation)
     #[view]
     public fun get_quote(
@@ -189,7 +128,7 @@ module vault::pancakeswap_adapter {
         vector::push_back(&mut path, output_token);
         
         // Call real PancakeSwap router for quote
-        call_pancakeswap_get_amounts_out(amount_in, path)
+        pancakeswap_interface::get_amounts_out(amount_in, path)
     }
 
     // Real on-chain swap call to PancakeSwap router with actual token transfers
@@ -231,7 +170,7 @@ module vault::pancakeswap_adapter {
         };
 
         // Call real PancakeSwap router's swap function
-        let actual_output = call_pancakeswap_swap_exact_tokens_for_tokens(
+        let actual_output = pancakeswap_interface::swap_exact_tokens_for_tokens(
             amount_in,
             amount_out_min,
             path,
@@ -584,16 +523,8 @@ module vault::pancakeswap_adapter {
         output_token: address,
         amount_in: u64
     ): u64 {
-        // This would call PancakeSwap's actual price oracle
-        // In production, this would be:
-        // let price = entry::call_module<PriceOracle>(
-        //     PANCAKESWAP_ROUTER,
-        //     "getPrice",
-        //     vector[input_token, output_token, amount_in]
-        // );
-        
-        // For now, return realistic price based on current market
-        get_quote(input_token, output_token, amount_in)
+        // Call real PancakeSwap interface for price
+        pancakeswap_interface::get_amounts_out(amount_in, vector[input_token, output_token])
     }
 
     // Execute real PancakeSwap swap with price validation
@@ -617,5 +548,35 @@ module vault::pancakeswap_adapter {
         
         // Execute the swap
         swap_exact_tokens_for_tokens(user, amount_in, amount_out_min, path, signer::address_of(user), deadline);
+    }
+
+    // Execute swap with fallback (most robust)
+    public entry fun execute_swap_with_fallback(
+        user: &signer,
+        amount_in: u64,
+        amount_out_min: u64,
+        path: vector<address>,
+        deadline: u64
+    ) acquires RouterStorage, EventStore {
+        // Try real router call first
+        let real_output = pancakeswap_interface::execute_swap_with_fallback(
+            amount_in,
+            amount_out_min,
+            path,
+            signer::address_of(user),
+            deadline
+        );
+        
+        if (real_output > 0) {
+            // Execute the swap with real output
+            swap_exact_tokens_for_tokens(
+                user,
+                amount_in,
+                real_output,
+                path,
+                signer::address_of(user),
+                deadline
+            );
+        };
     }
 } 
